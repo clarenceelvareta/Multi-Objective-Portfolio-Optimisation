@@ -1,13 +1,3 @@
 ﻿# HST-project1
 
-HST-project1/
-├── data.ipynb
-│   
-├── src/
-│   ├── fetch_universe.py
-│   ├── compute_returns.py
-│   ├── compute_cvar.py
-│   ├── constraints.py
-│   └── stress_windows.py
-├── config.py         # all constants in one place
-└── main_pipeline.py  # runs everything end-to-end
+- 'data.ipynb' uses to choose 80 stocks out of S&P500.

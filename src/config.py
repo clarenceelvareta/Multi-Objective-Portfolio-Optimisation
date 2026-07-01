@@ -42,13 +42,113 @@ ALL_TICKERS = SP500_EQUITIES + BOND_ETFS + BROAD_ETFS + CRYPTOS
 # Sector map: ticker -> GICS sector string
 # Fill this in after equity screening
 SECTOR_MAP = {
-    # e.g. "AAPL": "Information Technology",
-    # "JPM":  "Financials",
-    # ...
+    # --- Information Technology ---
+    "NVDA": "Information Technology",
+    "AAPL": "Information Technology",
+    "AMD": "Information Technology",
+    "INTC": "Information Technology",
+    "MSFT": "Information Technology",
+    "AVGO": "Information Technology",
+    "MU": "Information Technology",
+    "CSCO": "Information Technology",
+    "LRCX": "Information Technology",
+    "SMCI": "Information Technology",
+    "KLAC": "Information Technology",
+    "HPE": "Information Technology",
+    "GOOGL": "Communication Services",
+    "GOOG": "Communication Services",
+    "META": "Communication Services",
+    "NFLX": "Communication Services",
+    "CMCSA": "Communication Services",
+    
+    # --- Health Care ---
+    "PFE": "Health Care",
+    "BMY": "Health Care",
+    "MRK": "Health Care",
+    "GILD": "Health Care",
+    "BSX": "Health Care",
+    "JNJ": "Health Care",
+    "VTRS": "Health Care",
+    "CVS": "Health Care",
+    "ABBV": "Health Care",
+    "ABT": "Health Care",
+    
+    # --- Financials ---
+    "BAC": "Financials",
+    "WFC": "Financials",
+    "C": "Financials",
+    "JPM": "Financials",
+    "HBAN": "Financials",
+    "RF": "Financials",
+    "KEY": "Financials",
+    "PYPL": "Financials",
+    "MS": "Financials",
+    
+    # --- Consumer Discretionary ---
+    "TSLA": "Consumer Discretionary",
+    "AMZN": "Consumer Discretionary",
+    "F": "Consumer Discretionary",
+    "CMG": "Consumer Discretionary",
+    "CCL": "Consumer Discretionary",
+    "GM": "Consumer Discretionary",
+    "NCLH": "Consumer Discretionary",
+    "BKNG": "Consumer Discretionary",
+    
+    # --- Industrials ---
+    "CSX": "Industrials",
+    "GE": "Industrials",
+    "DAL": "Industrials",
+    "UAL": "Industrials",
+    "FAST": "Industrials",
+    "BA": "Industrials",
+    "LUV": "Industrials",
+    "RTX": "Industrials",
+    
+    # --- Communication Services ---
+    "T": "Communication Services",
+    "VZ": "Communication Services",
+    
+    # --- Consumer Staples ---
+    "WMT": "Consumer Staples",
+    "KO": "Consumer Staples",
+    "MO": "Consumer Staples",
+    "KR": "Consumer Staples",
+    "PG": "Consumer Staples",
+    "MDLZ": "Consumer Staples",
+    "KHC": "Consumer Staples",
+    
+    # --- Energy ---
+    "XOM": "Energy",
+    "KMI": "Energy",
+    "OXY": "Energy",
+    "HAL": "Energy",
+    "SLB": "Energy",
+    "CVX": "Energy",
+    
+    # --- Utilities ---
+    "PCG": "Utilities",
+    "NEE": "Utilities",
+    "EXC": "Utilities",
+    "AES": "Utilities",
+    "PPL": "Utilities",
+    
+    # --- Real Estate ---
+    "HST": "Real Estate",
+    "KIM": "Real Estate",
+    "WY": "Real Estate",
+    "DOC": "Real Estate",
+    
+    # --- Materials ---
+    "FCX": "Materials",
+    "DD": "Materials",
+    "NEM": "Materials",
+    
+    # --- Asset Classes (Keep these at the bottom) ---
     **{t: "Bond" for t in BOND_ETFS},
     **{t: "ETF"  for t in BROAD_ETFS},
     **{t: "Crypto" for t in CRYPTOS},
 }
+
 
 if __name__ == "__main__":
     print(f"Total tickers in config: {ALL_TICKERS}")

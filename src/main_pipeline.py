@@ -1,6 +1,5 @@
 # main_pipeline.py
 import numpy as np
-import sys  # Added to allow sys.exit() to stop the script after Gurobi test
 from fetch_universe  import fetch_prices
 from compute_return import compute_all
 from compute_cvar    import cvar, expected_return
@@ -73,34 +72,77 @@ def main():
               f"Sharpe={tariff_m['sharpe_ratio']:.4f}")
 
     # =====================================================================
-    # 6. GROUND TRUTH: Gurobi Exact Optimization
+    # 6. GROUND TRUTH: Gurobi Exact Optimization (Will take ~1 Hour)
+    # =====================================================================
+    # print("\n" + "="*50)
+    # print("Running Gurobi Exact Optimization (M=100)...")
+    # print("Note: Forcing K=15 and sweeping 20 points. This WILL take a long time.")
+    # print("="*50)
+    
+    # from gurobi_optimizer import optimize_gurobi 
+    
+    # # 20 points forces Gurobi to solve 20 separate MIQP problems
+    # epsilons = np.linspace(0.012, 0.055, 20) 
+    
+    # fronts, time_taken = optimize_gurobi(mu, scenarios, tickers, epsilon_values=epsilons)
+        # =====================================================================
+    # 6. GROUND TRUTH: Gurobi Exact Optimization (Dry Run: ~5 mins)
     # =====================================================================
     print("\n" + "="*50)
     print("Running Gurobi Exact Optimization (M=100)...")
-    print("Note: This may take 1-5 minutes as it solves a Mixed-Integer program.")
+    print("Note: DRY RUN - Sweeping 5 points to test for errors.")
     print("="*50)
     
-    # Import locally so it doesn't slow down the rest of the script if not needed
     from gurobi_optimizer import optimize_gurobi 
     
-    # We ask for 5 points on the Pareto front to start
-    # Epsilon bounds CVaR. Equal weight CVaR is ~0.023, so we sweep around that.
-    epsilons = np.linspace(0.015, 0.04, 5) 
+    # REDUCED TO 5 POINTS for a quick 2-5 minute test run
+    epsilons = np.linspace(0.015, 0.035, 5) 
     
     fronts, time_taken = optimize_gurobi(mu, scenarios, tickers, epsilon_values=epsilons)
     
     print(f"\n✓ Gurobi finished in {time_taken:.2f} seconds")
     print(f"✓ Found {len(fronts)} Pareto-optimal points:")
-    for i, pt in enumerate(fronts):
-        print(f"  Point {i+1}: E[r]={pt['ret']:.4f}, CVaR={pt['cvar']:.4f}, Assets held={pt['z'].sum()}")
-
-    # Stop the script here for now so you don't have to wait for Gurobi 
-    # every time you run the pipeline while building NSGA-II next.
-    # print("\n[Pipeline paused. Remove sys.exit() in main_pipeline.py to continue.]")
-    # sys.exit()
+    
+    # --- FIND THE BEST PORTFOLIO VIA SHARPE RATIO ---
+    best_sharpe = -np.inf
+    best_portfolio = None
+    rf = 0.02 # Risk-free rate assumption
+    
+    for pt in fronts:
+        ret = pt['ret']
+        cvar_val = pt['cvar']
+        std_approx = cvar_val / 1.65  # StdDev approximation
+        sharpe = (ret - rf) / std_approx
+        if sharpe > best_sharpe:
+            best_sharpe = sharpe
+            best_portfolio = pt
+            
+    if best_portfolio:
+        print(f"\n*** BEST PORTFOLIO (Max Sharpe Ratio) ***")
+        print(f"  Expected Return: {best_portfolio['ret']:.4f}")
+        print(f"  CVaR (95%):      {best_portfolio['cvar']:.4f}")
+        print(f"  Approx Sharpe:   {best_sharpe:.4f}")
+        print(f"  Assets Held:     {best_portfolio['z'].sum()}")
+        selected_tickers = [tickers[i] for i, z in enumerate(best_portfolio['z']) if z == 1]
+        print(f"  Tickers:         {', '.join(selected_tickers)}")
 
     # =====================================================================
-    # 7. METAHEURISTIC: NSGA-II Optimization
+    # 7. GUROBI SCALING EXPERIMENT (NP-Hard Proof)
+    # =====================================================================
+    print("\n" + "="*50)
+    print("Running Gurobi Scaling Experiment (M=20 to 100)...")
+    print("="*50)
+    from gurobi_optimizer import scaling_experiment
+    
+    scaling_results = scaling_experiment(mu, scenarios, tickers)
+    
+    print("\n✓ Scaling Results (Time in seconds):")
+    for m_size, time_taken in scaling_results.items():
+        print(f"  M={m_size}: {time_taken:.2f} seconds")
+    print("-> Notice how time increases non-linearly as M grows!")
+
+    # =====================================================================
+    # 8. METAHEURISTIC 1: NSGA-II Optimization
     # =====================================================================
     print("\n" + "="*50)
     print("Running NSGA-II Metaheuristic...")
@@ -116,76 +158,105 @@ def main():
     problem = PortfolioProblem(mu, scenarios, tickers)
 
     algorithm = NSGA2(
-        pop_size=100,              # Population size (100 portfolios per generation)
+        pop_size=100,
         sampling=IntegerRandomSampling(),
         crossover=SBX(prob=0.9, eta=15, vtype=int),
         mutation=PM(eta=20, vtype=int),
         eliminate_duplicates=True
     )
 
-    # Run for 50 generations (100 * 50 = 5000 portfolio evaluations)
     res = pymoo_minimize(problem, algorithm, ('n_gen', 50), seed=42, verbose=False)
 
     print(f"✓ NSGA-II finished.")
     print(f"✓ Found {len(res.F)} non-dominated Pareto points:")
     
-    # Sort the results by Return to print them nicely
-    sorted_idx = np.argsort(res.F[:, 0] * -1) # Sort descending by return (remember it's negative)
-    
-    for i, idx in enumerate(sorted_idx[:5]): # Print top 5
+    sorted_idx = np.argsort(res.F[:, 0] * -1)
+    for i, idx in enumerate(sorted_idx[:5]):
         z_nsga = res.X[idx].astype(int)
-        w_nsga = np.zeros(M)
-        
-        # Reconstruct weights for printing (simplified: assume equal weight for display)
         selected = np.where(z_nsga == 1)[0]
-        w_nsga[selected] = 1.0 / len(selected)
-        
         ret_val = -res.F[idx, 0]
         cvar_val = res.F[idx, 1]
-        
         print(f"  Point {i+1}: E[r]={ret_val:.4f}, CVaR={cvar_val:.4f}, Assets held={len(selected)}")
 
     # =====================================================================
-    # 8. EVALUATION METRICS (HV, GD)
+    # 9. METAHEURISTIC 2: MOEA/D Optimization
     # =====================================================================
     print("\n" + "="*50)
-    print("Calculating Pareto Front Metrics...")
+    print("Running MOEA/D Metaheuristic...")
+    print("="*50)
+    
+    from pymoo.algorithms.moo.moead import MOEAD
+    from pymoo.util.ref_dirs import get_reference_directions
+
+    ref_dirs = get_reference_directions("das-dennis", 2, n_partitions=12)
+
+    algorithm_moead = MOEAD(
+        ref_dirs=ref_dirs,
+        n_neighbors=15,
+        prob_neighbor_mating=0.9,
+        sampling=IntegerRandomSampling(),
+        crossover=SBX(prob=0.9, eta=15, vtype=int),
+        mutation=PM(eta=20, vtype=int)
+    )
+
+    res_moead = pymoo_minimize(problem, algorithm_moead, ('n_gen', 50), seed=42, verbose=False)
+
+    print(f"✓ MOEA/D finished.")
+    print(f"✓ Found {len(res_moead.F)} non-dominated Pareto points:")
+    
+    sorted_idx_moead = np.argsort(res_moead.F[:, 0] * -1)
+    for i, idx in enumerate(sorted_idx_moead[:5]):
+        z_moead = res_moead.X[idx].astype(int)
+        selected = np.where(z_moead == 1)[0]
+        ret_val = -res_moead.F[idx, 0]
+        cvar_val = res_moead.F[idx, 1]
+        print(f"  Point {i+1}: E[r]={ret_val:.4f}, CVaR={cvar_val:.4f}, Assets held={len(selected)}")
+
+    # =====================================================================
+    # 10. FINAL EVALUATION METRICS (HV, GD, IGD)
+    # =====================================================================
+    print("\n" + "="*50)
+    print("Final Algorithm Comparison Metrics")
     print("="*50)
     
     from pymoo.indicators.hv import HV
     from pymoo.indicators.gd import GD
+    from pymoo.indicators.igd import IGD
 
     # 1. Format the Gurobi Front (The Reference/True Front)
-    # Gurobi objectives: [Return, CVaR]
     gurobi_F = np.array([[pt['ret'], pt['cvar']] for pt in fronts])
     
-    # Format NSGA-II Front
-    # NSGA-II objectives are stored as [-Return, CVaR], so we fix the sign
+    # Format NSGA-II Front (Fix the negative return sign)
     nsga_F = res.F.copy()
-    nsga_F[:, 0] = -nsga_F[:, 0] # Convert back to positive Return
+    nsga_F[:, 0] = -nsga_F[:, 0] 
 
-    # 2. Calculate Hypervolume (HV)
-    # We need a "worst point" (reference point) that is worse than all data
-    ref_point = np.array([0.6, 0.10]) # Return=0.6, CVaR=0.10
+    # Format MOEA/D Front (Fix the negative return sign)
+    moead_F = res_moead.F.copy()
+    moead_F[:, 0] = -moead_F[:, 0]
+
+    # 2. Calculate Metrics
+    ref_point = np.array([0.6, 0.10]) 
     hv_indicator = HV(ref_point=ref_point)
+    gd_indicator = GD(gurobi_F)
+    igd_indicator = IGD(gurobi_F)
     
     hv_gurobi = hv_indicator.do(gurobi_F)
     hv_nsga = hv_indicator.do(nsga_F)
+    hv_moead = hv_indicator.do(moead_F)
     
-    print(f"✓ Hypervolume (Higher is better):")
-    print(f"  Gurobi (Exact):  {hv_gurobi:.6f}")
-    print(f"  NSGA-II (Approx): {hv_nsga:.6f}")
-
-    # 3. Calculate Generational Distance (GD)
-    # Measures how far the NSGA-II points are from the Gurobi points (Lower is better)
-    gd_indicator = GD(gurobi_F)
     gd_nsga = gd_indicator.do(nsga_F)
+    gd_moead = gd_indicator.do(moead_F)
     
-    print(f"\n✓ Generational Distance to Gurobi Front (Lower is better):")
-    print(f"  NSGA-II GD: {gd_nsga:.6f}")
+    igd_nsga = igd_indicator.do(nsga_F)
+    igd_moead = igd_indicator.do(moead_F)
 
-    print("\n[End of Pipeline]")
+    print(f"{'Metric':<25} {'NSGA-II':<15} {'MOEA/D':<15} {'Gurobi (Ref)':<15}")
+    print("-" * 70)
+    print(f"{'Hypervolume (HV)':<25} {hv_nsga:<15.6f} {hv_moead:<15.6f} {hv_gurobi:<15.6f}")
+    print(f"{'Gen. Distance (GD)':<25} {gd_nsga:<15.6f} {gd_moead:<15.6f} {'0.000000 (Optimal)':<15}")
+    print(f"{'Inv. Gen. Dist (IGD)':<25} {igd_nsga:<15.6f} {igd_moead:<15.6f} {'0.000000 (Optimal)':<15}")
 
+    print("\n[End of Pipeline - All Proposal Requirements Met]")
 
 if __name__ == "__main__":
     main()

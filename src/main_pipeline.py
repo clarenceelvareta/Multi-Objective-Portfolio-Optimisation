@@ -96,8 +96,96 @@ def main():
 
     # Stop the script here for now so you don't have to wait for Gurobi 
     # every time you run the pipeline while building NSGA-II next.
-    print("\n[Pipeline paused. Remove sys.exit() in main_pipeline.py to continue.]")
-    sys.exit()
+    # print("\n[Pipeline paused. Remove sys.exit() in main_pipeline.py to continue.]")
+    # sys.exit()
+
+    # =====================================================================
+    # 7. METAHEURISTIC: NSGA-II Optimization
+    # =====================================================================
+    print("\n" + "="*50)
+    print("Running NSGA-II Metaheuristic...")
+    print("="*50)
+    
+    from pymoo.algorithms.moo.nsga2 import NSGA2
+    from pymoo.operators.crossover.sbx import SBX
+    from pymoo.operators.mutation.pm import PM
+    from pymoo.operators.sampling.rnd import IntegerRandomSampling
+    from pymoo.optimize import minimize as pymoo_minimize
+    from nsga2_optimizer import PortfolioProblem
+
+    problem = PortfolioProblem(mu, scenarios, tickers)
+
+    algorithm = NSGA2(
+        pop_size=100,              # Population size (100 portfolios per generation)
+        sampling=IntegerRandomSampling(),
+        crossover=SBX(prob=0.9, eta=15, vtype=int),
+        mutation=PM(eta=20, vtype=int),
+        eliminate_duplicates=True
+    )
+
+    # Run for 50 generations (100 * 50 = 5000 portfolio evaluations)
+    res = pymoo_minimize(problem, algorithm, ('n_gen', 50), seed=42, verbose=False)
+
+    print(f"✓ NSGA-II finished.")
+    print(f"✓ Found {len(res.F)} non-dominated Pareto points:")
+    
+    # Sort the results by Return to print them nicely
+    sorted_idx = np.argsort(res.F[:, 0] * -1) # Sort descending by return (remember it's negative)
+    
+    for i, idx in enumerate(sorted_idx[:5]): # Print top 5
+        z_nsga = res.X[idx].astype(int)
+        w_nsga = np.zeros(M)
+        
+        # Reconstruct weights for printing (simplified: assume equal weight for display)
+        selected = np.where(z_nsga == 1)[0]
+        w_nsga[selected] = 1.0 / len(selected)
+        
+        ret_val = -res.F[idx, 0]
+        cvar_val = res.F[idx, 1]
+        
+        print(f"  Point {i+1}: E[r]={ret_val:.4f}, CVaR={cvar_val:.4f}, Assets held={len(selected)}")
+
+    # =====================================================================
+    # 8. EVALUATION METRICS (HV, GD)
+    # =====================================================================
+    print("\n" + "="*50)
+    print("Calculating Pareto Front Metrics...")
+    print("="*50)
+    
+    from pymoo.indicators.hv import HV
+    from pymoo.indicators.gd import GD
+
+    # 1. Format the Gurobi Front (The Reference/True Front)
+    # Gurobi objectives: [Return, CVaR]
+    gurobi_F = np.array([[pt['ret'], pt['cvar']] for pt in fronts])
+    
+    # Format NSGA-II Front
+    # NSGA-II objectives are stored as [-Return, CVaR], so we fix the sign
+    nsga_F = res.F.copy()
+    nsga_F[:, 0] = -nsga_F[:, 0] # Convert back to positive Return
+
+    # 2. Calculate Hypervolume (HV)
+    # We need a "worst point" (reference point) that is worse than all data
+    ref_point = np.array([0.6, 0.10]) # Return=0.6, CVaR=0.10
+    hv_indicator = HV(ref_point=ref_point)
+    
+    hv_gurobi = hv_indicator.do(gurobi_F)
+    hv_nsga = hv_indicator.do(nsga_F)
+    
+    print(f"✓ Hypervolume (Higher is better):")
+    print(f"  Gurobi (Exact):  {hv_gurobi:.6f}")
+    print(f"  NSGA-II (Approx): {hv_nsga:.6f}")
+
+    # 3. Calculate Generational Distance (GD)
+    # Measures how far the NSGA-II points are from the Gurobi points (Lower is better)
+    gd_indicator = GD(gurobi_F)
+    gd_nsga = gd_indicator.do(nsga_F)
+    
+    print(f"\n✓ Generational Distance to Gurobi Front (Lower is better):")
+    print(f"  NSGA-II GD: {gd_nsga:.6f}")
+
+    print("\n[End of Pipeline]")
+
 
 if __name__ == "__main__":
     main()

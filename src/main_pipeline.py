@@ -8,255 +8,236 @@ from stress_window  import covid_window, tariff_window, stress_metrics
 from config import ALL_TICKERS, K
 
 def main():
-    # 1. Prices
+    # =====================================================================
+    # 1. DATA LOADING & PREPROCESSING
+    # =====================================================================
     prices = fetch_prices()
-    
-    # --- SAFETY DROP: Remove any tickers that yfinance failed to download ---
-    prices = prices.dropna(axis=1, how='all')
+    prices = prices.dropna(axis=1, how='all') # Safety drop failed downloads
     
     tickers = list(prices.columns)
     M = len(tickers)
     print(f"\n✓ Universe: {M} assets, {len(prices)} trading days")
 
-    # 2. Returns
     ret, mu, Sigma = compute_all(prices)
     scenarios = ret.values
     
-    # --- IRONCLAD CHECK: Force shapes to match exactly ---
-    assert scenarios.shape[1] == M, (
-        f"SHAPE MISMATCH! Returns matrix has {scenarios.shape[1]} columns, "
-        f"but prices has {M} columns. Check compute_all() for hidden extra columns."
-    )
+    assert scenarios.shape[1] == M, "SHAPE MISMATCH! Check compute_all()."
     print(f"✓ Returns computed: mu range [{mu.min():.3f}, {mu.max():.3f}]")
 
-    # 3. CVaR on equal-weight
+    # =====================================================================
+    # 2. BASELINE EVALUATION
+    # =====================================================================
     w_eq = np.ones(M) / M
     print(f"✓ Equal-weight CVaR95 = {cvar(w_eq, scenarios):.4f}")
     print(f"✓ Equal-weight E[r]   = {expected_return(w_eq, mu):.4f}")
 
-    # 4. Constraint check on equal-weight AND a random test
-    print(f"DEBUG: w_eq sum is exactly {w_eq.sum():.4f} (Should be 1.0000)")
-    
-    # Test the random portfolio
+    # Random portfolio test (for constraint checking)
     rng = np.random.default_rng(42)
     z = np.zeros(M, dtype=int)
     z[rng.choice(M, K, replace=False)] = 1
     w_rand = np.zeros(M)
     w_rand[z == 1] = 1.0 / K
     z, w_rand = repair(z, w_rand, tickers)
-    
-    print(f"DEBUG: w_rand sum is {w_rand.sum():.4f} (If > 1.0, the bug is inside repair())")
-    
     feasible, reasons = is_feasible(z, w_rand, tickers)
-    print(f"✓ Baseline constraints check: {feasible} (Expected False for un-optimized random weights)")
+    print(f"✓ Baseline constraints check: {feasible} (Expected False for random weights)")
     if not feasible:
-        for r in reasons:
-            print(f"  ✗ {r}")
+        for r in reasons: print(f"  ✗ {r}")
 
-    # 5. Stress windows
-    # COVID window
+    # =====================================================================
+    # 3. STRESS TESTING (Baseline)
+    # =====================================================================
     ret_covid = covid_window(ret)
     covid_m   = stress_metrics(w_eq, ret_covid, mu)
-    print(f"✓ COVID stress: CVaR={covid_m['realised_cvar']:.4f}, "
-          f"MaxDD={covid_m['max_drawdown']:.4f}, "
-          f"Sharpe={covid_m['sharpe_ratio']:.4f}")
+    print(f"✓ COVID stress: CVaR={covid_m['realised_cvar']:.4f}, MaxDD={covid_m['max_drawdown']:.4f}, Sharpe={covid_m['sharpe_ratio']:.4f}")
 
-    # Trump Tariff window
     ret_tariff = tariff_window(ret)
     tariff_m   = stress_metrics(w_eq, ret_tariff, mu)
-    if tariff_m["realised_cvar"] is None:
-        print(f"✗ Tariff stress: {tariff_m['note']}")
-    else:
-        print(f"✓ Tariff stress: CVaR={tariff_m['realised_cvar']:.4f}, "
-              f"MaxDD={tariff_m['max_drawdown']:.4f}, "
-              f"Sharpe={tariff_m['sharpe_ratio']:.4f}")
+    if tariff_m["realised_cvar"] is not None:
+        print(f"✓ Tariff stress: CVaR={tariff_m['realised_cvar']:.4f}, MaxDD={tariff_m['max_drawdown']:.4f}, Sharpe={tariff_m['sharpe_ratio']:.4f}")
 
     # =====================================================================
-    # 6. GROUND TRUTH: Gurobi Exact Optimization (Will take ~1 Hour)
-    # =====================================================================
-    # print("\n" + "="*50)
-    # print("Running Gurobi Exact Optimization (M=100)...")
-    # print("Note: Forcing K=15 and sweeping 20 points. This WILL take a long time.")
-    # print("="*50)
-    
-    # from gurobi_optimizer import optimize_gurobi 
-    
-    # # 20 points forces Gurobi to solve 20 separate MIQP problems
-    # epsilons = np.linspace(0.012, 0.055, 20) 
-    
-    # fronts, time_taken = optimize_gurobi(mu, scenarios, tickers, epsilon_values=epsilons)
-        # =====================================================================
-    # 6. GROUND TRUTH: Gurobi Exact Optimization (Dry Run: ~5 mins)
+    # 4. GROUND TRUTH: Gurobi Exact Optimization (Dry Run: ~5 mins)
     # =====================================================================
     print("\n" + "="*50)
     print("Running Gurobi Exact Optimization (M=100)...")
-    print("Note: DRY RUN - Sweeping 5 points to test for errors.")
+    print("Note: DRY RUN - Sweeping 5 points. Change to 20 for 1hr run.")
     print("="*50)
     
-    from gurobi_optimizer import optimize_gurobi 
-    
-    # REDUCED TO 5 POINTS for a quick 2-5 minute test run
+    from gurobi_optimizer import optimize_gurobi, scaling_experiment
     epsilons = np.linspace(0.015, 0.035, 5) 
     
     fronts, time_taken = optimize_gurobi(mu, scenarios, tickers, epsilon_values=epsilons)
-    
     print(f"\n✓ Gurobi finished in {time_taken:.2f} seconds")
     print(f"✓ Found {len(fronts)} Pareto-optimal points:")
     
-    # --- FIND THE BEST PORTFOLIO VIA SHARPE RATIO ---
+    # Find Best Portfolio via Sharpe Ratio
     best_sharpe = -np.inf
     best_portfolio = None
-    rf = 0.02 # Risk-free rate assumption
+    rf = 0.02 
     
     for pt in fronts:
-        ret = pt['ret']
-        cvar_val = pt['cvar']
-        std_approx = cvar_val / 1.65  # StdDev approximation
-        sharpe = (ret - rf) / std_approx
+        std_approx = pt['cvar'] / 1.65 
+        sharpe = (pt['ret'] - rf) / std_approx
         if sharpe > best_sharpe:
             best_sharpe = sharpe
             best_portfolio = pt
             
     if best_portfolio:
         print(f"\n*** BEST PORTFOLIO (Max Sharpe Ratio) ***")
-        print(f"  Expected Return: {best_portfolio['ret']:.4f}")
-        print(f"  CVaR (95%):      {best_portfolio['cvar']:.4f}")
-        print(f"  Approx Sharpe:   {best_sharpe:.4f}")
-        print(f"  Assets Held:     {best_portfolio['z'].sum()}")
+        print(f"  Expected Return: {best_portfolio['ret']:.4f} | CVaR: {best_portfolio['cvar']:.4f} | Sharpe: {best_sharpe:.4f}")
         selected_tickers = [tickers[i] for i, z in enumerate(best_portfolio['z']) if z == 1]
-        print(f"  Tickers:         {', '.join(selected_tickers)}")
+        print(f"  Tickers: {', '.join(selected_tickers)}")
 
     # =====================================================================
-    # 7. GUROBI SCALING EXPERIMENT (NP-Hard Proof)
+    # 5. GUROBI SCALING EXPERIMENT (NP-Hard Proof)
     # =====================================================================
     print("\n" + "="*50)
     print("Running Gurobi Scaling Experiment (M=20 to 100)...")
     print("="*50)
-    from gurobi_optimizer import scaling_experiment
     
     scaling_results = scaling_experiment(mu, scenarios, tickers)
-    
     print("\n✓ Scaling Results (Time in seconds):")
-    for m_size, time_taken in scaling_results.items():
-        print(f"  M={m_size}: {time_taken:.2f} seconds")
-    print("-> Notice how time increases non-linearly as M grows!")
+    for m_size, t in scaling_results.items():
+        print(f"  M={m_size}: {t:.2f} seconds")
 
     # =====================================================================
-    # 8. METAHEURISTIC 1: NSGA-II Optimization
+    # 6. CONSTRAINT HANDLING COMPARISON (Week 3 Concepts)
     # =====================================================================
     print("\n" + "="*50)
-    print("Running NSGA-II Metaheuristic...")
+    print("Constraint Handling: Repair vs Penalty vs Decoder")
     print("="*50)
     
     from pymoo.algorithms.moo.nsga2 import NSGA2
     from pymoo.operators.crossover.sbx import SBX
     from pymoo.operators.mutation.pm import PM
-    from pymoo.operators.sampling.rnd import IntegerRandomSampling
+    from pymoo.operators.sampling.rnd import IntegerRandomSampling, FloatRandomSampling
     from pymoo.optimize import minimize as pymoo_minimize
-    from nsga2_optimizer import PortfolioProblem
-
-    problem = PortfolioProblem(mu, scenarios, tickers)
-
-    algorithm = NSGA2(
-        pop_size=100,
-        sampling=IntegerRandomSampling(),
-        crossover=SBX(prob=0.9, eta=15, vtype=int),
-        mutation=PM(eta=20, vtype=int),
-        eliminate_duplicates=True
-    )
-
-    res = pymoo_minimize(problem, algorithm, ('n_gen', 50), seed=42, verbose=False)
-
-    print(f"✓ NSGA-II finished.")
-    print(f"✓ Found {len(res.F)} non-dominated Pareto points:")
+    from nsga2_optimizer import PortfolioProblem, PortfolioProblemPenalty, PortfolioProblemDecoder
     
-    sorted_idx = np.argsort(res.F[:, 0] * -1)
-    for i, idx in enumerate(sorted_idx[:5]):
-        z_nsga = res.X[idx].astype(int)
-        selected = np.where(z_nsga == 1)[0]
-        ret_val = -res.F[idx, 0]
-        cvar_val = res.F[idx, 1]
-        print(f"  Point {i+1}: E[r]={ret_val:.4f}, CVaR={cvar_val:.4f}, Assets held={len(selected)}")
+    problem_repair = PortfolioProblem(mu, scenarios, tickers)
+    problem_penalty = PortfolioProblemPenalty(mu, scenarios, tickers)
+    problem_decoder = PortfolioProblemDecoder(mu, scenarios, tickers)
+    
+    constraint_results = {}
+    
+    print("\n--- Running NSGA-II with REPAIR ---")
+    algo = NSGA2(pop_size=500, sampling=IntegerRandomSampling(), crossover=SBX(prob=0.9, eta=15, vtype=int), mutation=PM(eta=20, vtype=int), eliminate_duplicates=True)
+    res_r = pymoo_minimize(problem_repair, algo, ('n_gen', 50), seed=42, verbose=False)
+    
+    print("--- Running NSGA-II with PENALTY ---")
+    algo = NSGA2(pop_size=500, sampling=IntegerRandomSampling(), crossover=SBX(prob=0.9, eta=15, vtype=int), mutation=PM(eta=20, vtype=int), eliminate_duplicates=True)
+    res_p = pymoo_minimize(problem_penalty, algo, ('n_gen', 50), seed=42, verbose=False)
+    
+    print("--- Running NSGA-II with DECODER ---")
+    algo = NSGA2(pop_size=500, sampling=FloatRandomSampling(), crossover=SBX(prob=0.9, eta=15), mutation=PM(eta=20), eliminate_duplicates=True)
+    res_d = pymoo_minimize(problem_decoder, algo, ('n_gen', 50), seed=42, verbose=False)
+
+    # Evaluate Metrics
+    from pymoo.indicators.hv import HV
+    from pymoo.indicators.gd import GD
+    from pymoo.indicators.igd import IGD
+    
+    gurobi_F = np.array([[pt['ret'], pt['cvar']] for pt in fronts])
+    hv_ind = HV(ref_point=np.array([0.6, 0.10]))
+    gd_ind = GD(gurobi_F)
+    igd_ind = IGD(gurobi_F)
+
+    for name, res in [("Repair", res_r), ("Penalty", res_p), ("Decoder", res_d)]:
+        F = res.F.copy(); F[:, 0] = -F[:, 0] 
+        constraint_results[name] = {
+            "HV": hv_ind.do(F), "GD": gd_ind.do(F), "IGD": igd_ind.do(F)
+        }
+
+    print("\n" + "-"*50)
+    print("Week 3 Constraint Handling Comparison")
+    print("-"*50)
+    print(f"{'Method':<15} {'HV (Higher)':<15} {'GD (Lower)':<15} {'IGD (Lower)':<15}")
+    print("-" * 60)
+    for name, metrics in constraint_results.items():
+        print(f"{name:<15} {metrics['HV']:<15.6f} {metrics['GD']:<15.6f} {metrics['IGD']:<15.6f}")
+
+    best_ch_method = max(constraint_results, key=lambda k: constraint_results[k]["HV"])
+    print(f"\n-> Winner: '{best_ch_method}'. Using it for final algorithm comparison.")
+    
+    if best_ch_method == "Repair": res_nsga_final = res_r; problem_final = problem_repair
+    elif best_ch_method == "Penalty": res_nsga_final = res_p; problem_final = problem_penalty
+    else: res_nsga_final = res_d; problem_final = problem_decoder
+        
+    nsga_F = res_nsga_final.F.copy(); nsga_F[:, 0] = -nsga_F[:, 0]
 
     # =====================================================================
-    # 9. METAHEURISTIC 2: MOEA/D Optimization
+    # 7. MULTI-OBJECTIVE ALGORITHM COMPARISON (Weeks 4, 5, 6)
     # =====================================================================
     print("\n" + "="*50)
-    print("Running MOEA/D Metaheuristic...")
+    print("Algorithm Comparison: NSGA-II vs MOEA/D vs OMOPSO")
     print("="*50)
     
     from pymoo.algorithms.moo.moead import MOEAD
     from pymoo.util.ref_dirs import get_reference_directions
 
+    # --- MOEA/D ---
+    print("--- Running MOEA/D ---")
     ref_dirs = get_reference_directions("das-dennis", 2, n_partitions=12)
+    algo_moead = MOEAD(ref_dirs=ref_dirs, n_neighbors=15, prob_neighbor_mating=0.9, sampling=IntegerRandomSampling(), crossover=SBX(prob=0.9, eta=15, vtype=int), mutation=PM(eta=20, vtype=int))
+    res_moead = pymoo_minimize(problem_final, algo_moead, ('n_gen', 50), seed=42, verbose=False)
 
-    algorithm_moead = MOEAD(
-        ref_dirs=ref_dirs,
-        n_neighbors=15,
-        prob_neighbor_mating=0.9,
-        sampling=IntegerRandomSampling(),
-        crossover=SBX(prob=0.9, eta=15, vtype=int),
-        mutation=PM(eta=20, vtype=int)
-    )
+    # --- AGE-MOEA (Adaptive Geometry Estimation) ---
+    print("--- Running AGE-MOEA (Alternative Paradigm) ---")
+    from pymoo.algorithms.moo.age import AGEMOEA
+    # AGE-MOEA uses an auto-adaptive clustering mechanism instead of crowding distance
+    algo_age = AGEMOEA(pop_size=500, sampling=IntegerRandomSampling(), 
+                       crossover=SBX(prob=0.9, eta=15, vtype=int), 
+                       mutation=PM(eta=20, vtype=int),
+                       eliminate_duplicates=True)
+    res_age = pymoo_minimize(problem_final, algo_age, ('n_gen', 50), seed=42, verbose=False)
 
-    res_moead = pymoo_minimize(problem, algorithm_moead, ('n_gen', 50), seed=42, verbose=False)
+    # Final Metrics Table
+    moead_F = res_moead.F.copy(); moead_F[:, 0] = -moead_F[:, 0]
+    age_F = res_age.F.copy(); age_F[:, 0] = -age_F[:, 0]
 
-    print(f"✓ MOEA/D finished.")
-    print(f"✓ Found {len(res_moead.F)} non-dominated Pareto points:")
-    
-    sorted_idx_moead = np.argsort(res_moead.F[:, 0] * -1)
-    for i, idx in enumerate(sorted_idx_moead[:5]):
-        z_moead = res_moead.X[idx].astype(int)
-        selected = np.where(z_moead == 1)[0]
-        ret_val = -res_moead.F[idx, 0]
-        cvar_val = res_moead.F[idx, 1]
-        print(f"  Point {i+1}: E[r]={ret_val:.4f}, CVaR={cvar_val:.4f}, Assets held={len(selected)}")
+    print("\n" + "-"*50)
+    print("Final Multi-Objective Algorithm Metrics")
+    print("-"*50)
+    print(f"{'Algorithm':<15} {'HV (Higher)':<15} {'GD (Lower)':<15} {'IGD (Lower)':<15}")
+    print("-" * 60)
+    print(f"{'NSGA-II':<15} {hv_ind.do(nsga_F):<15.6f} {gd_ind.do(nsga_F):<15.6f} {igd_ind.do(nsga_F):<15.6f}")
+    print(f"{'MOEA/D':<15} {hv_ind.do(moead_F):<15.6f} {gd_ind.do(moead_F):<15.6f} {igd_ind.do(moead_F):<15.6f}")
+    print(f"{'AGE-MOEA':<15} {hv_ind.do(age_F):<15.6f} {gd_ind.do(age_F):<15.6f} {igd_ind.do(age_F):<15.6f}")
+    print(f"{'Gurobi':<15} {hv_ind.do(gurobi_F):<15.6f} {'0.000000':<15} {'0.000000':<15}")
+
+    print("\n" + "-"*50)
+    print("Final Multi-Objective Algorithm Metrics")
+    print("-"*50)
+    print(f"{'Algorithm':<15} {'HV (Higher)':<15} {'GD (Lower)':<15} {'IGD (Lower)':<15}")
+    print("-" * 60)
+    print(f"{'NSGA-II':<15} {hv_ind.do(nsga_F):<15.6f} {gd_ind.do(nsga_F):<15.6f} {igd_ind.do(nsga_F):<15.6f}")
+    print(f"{'MOEA/D':<15} {hv_ind.do(moead_F):<15.6f} {gd_ind.do(moead_F):<15.6f} {igd_ind.do(moead_F):<15.6f}")
+    print(f"{'AGE-MOEA':<15} {hv_ind.do(age_F):<15.6f} {gd_ind.do(age_F):<15.6f} {igd_ind.do(age_F):<15.6f}")
+    print(f"{'Gurobi':<15} {hv_ind.do(gurobi_F):<15.6f} {'0.000000':<15} {'0.000000':<15}")
 
     # =====================================================================
-    # 10. FINAL EVALUATION METRICS (HV, GD, IGD)
+    # 8. STRESS TEST THE BEST PORTFOLIO
     # =====================================================================
     print("\n" + "="*50)
-    print("Final Algorithm Comparison Metrics")
+    print("Stress Testing Best Gurobi Portfolio...")
     print("="*50)
     
-    from pymoo.indicators.hv import HV
-    from pymoo.indicators.gd import GD
-    from pymoo.indicators.igd import IGD
+    if best_portfolio is not None:
+        w_best = best_portfolio['w']
+        
+        covid_m_best = stress_metrics(w_best, ret_covid, mu)
+        print(f"✓ BEST PORT COVID: MaxDD={covid_m_best['max_drawdown']:.4f} | Sharpe={covid_m_best['sharpe_ratio']:.4f}")
+        
+        if tariff_m["realised_cvar"] is not None:
+            tariff_m_best = stress_metrics(w_best, ret_tariff, mu)
+            print(f"✓ BEST PORT TARIFF: MaxDD={tariff_m_best['max_drawdown']:.4f} | Sharpe={tariff_m_best['sharpe_ratio']:.4f}")
+            
+        print("\n--- Comparison vs Equal Weight ---")
+        print(f"COVID MaxDD  -> Equal Weight: {covid_m['max_drawdown']:.4f} | Optimized: {covid_m_best['max_drawdown']:.4f}")
+        if tariff_m["realised_cvar"] is not None:
+            print(f"Tariff MaxDD -> Equal Weight: {tariff_m['max_drawdown']:.4f} | Optimized: {tariff_m_best['max_drawdown']:.4f}")
 
-    # 1. Format the Gurobi Front (The Reference/True Front)
-    gurobi_F = np.array([[pt['ret'], pt['cvar']] for pt in fronts])
-    
-    # Format NSGA-II Front (Fix the negative return sign)
-    nsga_F = res.F.copy()
-    nsga_F[:, 0] = -nsga_F[:, 0] 
-
-    # Format MOEA/D Front (Fix the negative return sign)
-    moead_F = res_moead.F.copy()
-    moead_F[:, 0] = -moead_F[:, 0]
-
-    # 2. Calculate Metrics
-    ref_point = np.array([0.6, 0.10]) 
-    hv_indicator = HV(ref_point=ref_point)
-    gd_indicator = GD(gurobi_F)
-    igd_indicator = IGD(gurobi_F)
-    
-    hv_gurobi = hv_indicator.do(gurobi_F)
-    hv_nsga = hv_indicator.do(nsga_F)
-    hv_moead = hv_indicator.do(moead_F)
-    
-    gd_nsga = gd_indicator.do(nsga_F)
-    gd_moead = gd_indicator.do(moead_F)
-    
-    igd_nsga = igd_indicator.do(nsga_F)
-    igd_moead = igd_indicator.do(moead_F)
-
-    print(f"{'Metric':<25} {'NSGA-II':<15} {'MOEA/D':<15} {'Gurobi (Ref)':<15}")
-    print("-" * 70)
-    print(f"{'Hypervolume (HV)':<25} {hv_nsga:<15.6f} {hv_moead:<15.6f} {hv_gurobi:<15.6f}")
-    print(f"{'Gen. Distance (GD)':<25} {gd_nsga:<15.6f} {gd_moead:<15.6f} {'0.000000 (Optimal)':<15}")
-    print(f"{'Inv. Gen. Dist (IGD)':<25} {igd_nsga:<15.6f} {igd_moead:<15.6f} {'0.000000 (Optimal)':<15}")
-
-    print("\n[End of Pipeline - All Proposal Requirements Met]")
+    print("\n[End of Pipeline - All Proposal & Syllabus Requirements Met]")
 
 if __name__ == "__main__":
     main()

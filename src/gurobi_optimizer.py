@@ -1,135 +1,244 @@
+# gurobi_optimizer.py
 import numpy as np
+import time
 import gurobipy as gp
 from gurobipy import GRB
-from config import (W_MIN, W_MAX, K, SECTOR_CAP, CRYPTO_CAP, 
+from config import (W_MIN, W_MAX, K, SECTOR_CAP, CRYPTO_CAP,
                     BOND_FLOOR, CVAR_ALPHA, BOND_ETFS, CRYPTOS, SECTOR_MAP)
 
-def optimize_gurobi(mu, scenarios, tickers, epsilon_values=None, verbose=False):
-    """
-    Solves the bi-objective CVaR-Return problem exactly using Gurobi.
-    Uses epsilon-constraint method on CVaR to find the Pareto front.
-    
-    Returns:
-        fronts: list of dicts, each containing 'w', 'z', 'ret', 'cvar'
-        solve_time: total time taken
-    """
-    M = len(tickers)
-    T = len(scenarios)
-    alpha = CVAR_ALPHA
-    n_scenarios = int(np.ceil(T * (1 - alpha))) # Number of tail scenarios
-    
-    # If no epsilon values provided, create a sweep of 15 points
-    if epsilon_values is None:
-        eps_min = 0.01
-        eps_max = 0.08 # Adjust this based on your equal-weight CVaR (~0.023)
-        epsilon_values = np.linspace(eps_min, eps_max, 15)
 
-    fronts = []
-    
-    # Precompute mappings for constraints
+def _build_cvar_model(m, mu_arr, scenarios_arr, tickers,
+                       sector_map_inv, bond_idxs, crypto_idxs,
+                       eps, cvar_denom):
+    """
+    Shared helper — builds one Gurobi model for a given epsilon.
+    Called by both optimize_gurobi and scaling_experiment_proper.
+    """
+    M = len(mu_arr)
+    T = len(scenarios_arr)
+
+    w   = m.addMVar(M, lb=0.0, ub=W_MAX,  name="w")
+    z   = m.addMVar(M, vtype=GRB.BINARY,   name="z")
+    VaR = m.addMVar(1, lb=-GRB.INFINITY,   name="VaR")  # MVar(1) not addVar
+    U   = m.addMVar(T, lb=0.0,             name="U")
+
+    # ── standard constraints ───────────────────────────────────────────
+    m.addConstr(w.sum() == 1.0,  "Budget")
+    m.addConstr(z.sum() <= K,    "Cardinality")
+    m.addConstr(w >= W_MIN * z,  "Link_Lower")
+    m.addConstr(w <= W_MAX * z,  "Link_Upper")
+
+    for sec, idxs in sector_map_inv.items():
+        if sec not in ["Bond", "ETF", "Crypto"]:
+            m.addConstr(
+                gp.quicksum(w[i] for i in idxs) <= SECTOR_CAP,
+                f"SecCap_{sec}"
+            )
+    if crypto_idxs:
+        m.addConstr(
+            gp.quicksum(w[i] for i in crypto_idxs) <= CRYPTO_CAP,
+            "Crypto_Cap"
+        )
+    if bond_idxs:
+        m.addConstr(
+            gp.quicksum(w[i] for i in bond_idxs) >= BOND_FLOOR,
+            "Bond_Floor"
+        )
+
+    # ── CVaR linearisation ─────────────────────────────────────────────
+    # U_t >= -r_t^T w - VaR  for all t
+    # KEY FIX: use np.ones((T,1)) @ VaR to broadcast MVar(1) across T rows
+    ones_col = np.ones((T, 1))
+    m.addConstr(
+        U >= -scenarios_arr @ w - ones_col @ VaR,
+        "Shortfall"
+    )
+    m.addConstr(
+        VaR.sum() + (1.0 / cvar_denom) * U.sum() <= eps,
+        "Epsilon_CVaR"
+    )
+
+    m.setObjective(mu_arr @ w, GRB.MAXIMIZE)
+
+    return w, z, VaR, U
+
+
+def optimize_gurobi(mu, scenarios, tickers, epsilon_values=None, verbose=False):
+    M             = len(tickers)
+    T             = len(scenarios)
+    alpha         = CVAR_ALPHA
+    cvar_denom    = T * (1.0 - alpha)
+    mu_arr        = mu.to_numpy() if hasattr(mu, "to_numpy") else np.asarray(mu)
+    scenarios_arr = np.asarray(scenarios, dtype=float)
+
+    if epsilon_values is None:
+        epsilon_values = np.linspace(0.010, 0.045, 20)
+
+    # precompute index maps
     sector_map_inv = {}
     for idx, ticker in enumerate(tickers):
         sec = SECTOR_MAP.get(ticker, "Unknown")
-        if sec not in sector_map_inv:
-            sector_map_inv[sec] = []
-        sector_map_inv[sec].append(idx)
-        
-    bond_idxs = [i for i, t in enumerate(tickers) if t in BOND_ETFS]
+        sector_map_inv.setdefault(sec, []).append(idx)
+
+    bond_idxs   = [i for i, t in enumerate(tickers) if t in BOND_ETFS]
     crypto_idxs = [i for i, t in enumerate(tickers) if t in CRYPTOS]
 
+    fronts     = []
+    total_time = 0.0
+
     for eps in epsilon_values:
-        m = gp.Model("CVaR_Pareto")
-        if not verbose:
-            m.setParam('OutputFlag', 0)
+        t0 = time.time()
+        m  = gp.Model("CVaR_Pareto")
+        m.setParam("OutputFlag", 0)
+        m.setParam("TimeLimit", 120)
 
-        # --- Decision Variables ---
-        w = m.addMVar(M, lb=0, ub=W_MAX, name="w")
-        z = m.addMVar(M, vtype=GRB.BINARY, name="z")
-        
-        # Auxiliary variables for CVaR linearization (Rockafellar & Uryasev)
-        VaR = m.addVar(lb=-GRB.INFINITY, name="VaR")
-        U = m.addMVar(T, lb=0, name="U") # Shortfall variables
+        w, z, VaR, U = _build_cvar_model(
+            m, mu_arr, scenarios_arr, tickers,
+            sector_map_inv, bond_idxs, crypto_idxs,
+            eps, cvar_denom
+        )
 
-        # --- Constraints ---
-        # 1. Budget
-        m.addConstr(w.sum() == 1.0, "Budget")
-        
-        # 2. Cardinality
-        m.addConstr(z.sum() <= K, "Cardinality")
-        
-        # 3. Linkage: W_MIN * z <= w <= W_MAX * z
-        m.addConstr(w >= W_MIN * z, "Link_Lower")
-        m.addConstr(w <= W_MAX * z, "Link_Upper")
-        
-        # 4. Sector Caps
-        for sec, idxs in sector_map_inv.items():
-            if sec not in ["Bond", "ETF", "Crypto"]: # Only apply to GICS sectors
-                m.addConstr(w[idxs].sum() <= SECTOR_CAP, f"SecCap_{sec}")
-                
-        # 5. Crypto Cap
-        if crypto_idxs:
-            m.addConstr(w[crypto_idxs].sum() <= CRYPTO_CAP, "Crypto_Cap")
-            
-        # 6. Bond Floor
-        if bond_idxs:
-            m.addConstr(w[bond_idxs].sum() >= BOND_FLOOR, "Bond_Floor")
-
-        # 7. CVaR Linearization Constraints
-        # U_t >= -r_t^T w - VaR  ==>  Loss - VaR
-        # Note: scenarios is TxM, so -scenarios @ w gives losses
-        m.addConstr(U >= -scenarios @ w - VaR, "Shortfall_Def")
-        
-        # 8. Epsilon constraint on CVaR (This traces the Pareto front)
-        # CVaR = VaR + (1/(T*(1-alpha))) * sum(U)
-        m.addConstr(VaR + (1.0 / n_scenarios) * U.sum() <= eps, "Epsilon_CVaR")
-
-        # --- Objective ---
-        # Maximize Expected Return: mu^T w
-        m.setObjective(mu.to_numpy() @ w, GRB.MAXIMIZE)
-
-        # --- Solve ---
         try:
             m.optimize()
-            
-            if m.status == GRB.OPTIMAL:
-                w_opt = w.X
-                z_opt = (w_opt > 1e-4).astype(int) # Clean up floating point binaries
-                
-                # Calculate actual realized CVaR for this portfolio
-                realized_cvar = VaR.X + (1.0 / n_scenarios) * U.X.sum()
-                realized_ret = mu @ w_opt
-                
+            elapsed     = time.time() - t0
+            total_time += elapsed
+
+            if m.Status == GRB.OPTIMAL:
+                w_opt         = np.array(w.X)
+                z_opt         = np.array(z.X)
+                var_val       = float(VaR.X[0])
+                realised_cvar = var_val + (1.0 / cvar_denom) * np.array(U.X).sum()
+                realised_ret  = float(mu_arr @ w_opt)
+
                 fronts.append({
-                    'w': w_opt,
-                    'z': z_opt,
-                    'ret': realized_ret,
-                    'cvar': realized_cvar
+                    "w":    w_opt,
+                    "z":    z_opt,
+                    "ret":  realised_ret,
+                    "cvar": realised_cvar,
                 })
-        except gp.GurobiError as e:
+                if verbose:
+                    print(f"  eps={eps:.4f}  ret={realised_ret:.4f}  "
+                          f"cvar={realised_cvar:.4f}  t={elapsed:.1f}s")
+            else:
+                if verbose:
+                    print(f"  eps={eps:.4f}  status={m.Status} (infeasible)")
+
+        except Exception as e:
             if verbose:
-                print(f"Infeasible at epsilon {eps:.4f}: {e}")
-            pass
+                print(f"  eps={eps:.4f}  Error: {e}")
 
-    solve_time = m.Runtime if 'm' in locals() else 0
-    return fronts, solve_time
+    return fronts, total_time
 
-def scaling_experiment(mu_full, scenarios_full, tickers_full):
-    """
-    Runs the Gurobi optimizer for M = 20, 40, 60, 80, 100 and records time.
-    """
-    sizes = [20, 40, 60, 80, 100]
-    results = {}
-    
-    for M_target in sizes:
-        print(f"Running Gurobi for M={M_target}...")
-        # Take the first M_target assets to keep it simple
-        mu_sub = mu_full[:M_target]
-        scen_sub = scenarios_full[:, :M_target]
-        tick_sub = tickers_full[:M_target]
-        
-        # Only ask for 1 point on the frontier to test pure solve speed
-        fronts, time_taken = optimize_gurobi(mu_sub, scen_sub, tick_sub, epsilon_values=[0.05])
-        results[M_target] = time_taken
-        print(f"  -> M={M_target} solved in {time_taken:.2f} seconds ({len(fronts)} points)")
-        
+
+def scaling_experiment_proper(mu, scenarios, tickers,
+                               n_epsilons=20, time_limit=300):
+    M_values      = [20, 40, 60, 80, 100]
+    results       = {}
+    alpha         = CVAR_ALPHA
+    mu_arr        = mu.to_numpy() if hasattr(mu, "to_numpy") else np.asarray(mu)
+    scenarios_arr = np.asarray(scenarios, dtype=float)
+
+    bond_idxs   = [i for i, t in enumerate(tickers) if t in BOND_ETFS]
+    crypto_idxs = [i for i, t in enumerate(tickers) if t in CRYPTOS]
+    other_idxs  = [i for i in range(len(tickers))
+                   if i not in bond_idxs and i not in crypto_idxs]
+
+    for M_size in M_values:
+        print(f"\nM={M_size} — sweeping {n_epsilons} epsilon points...")
+
+        # ── stratified subset ──────────────────────────────────────────
+        n_bonds  = max(2, round(len(bond_idxs)   / len(tickers) * M_size))
+        n_crypto = max(1, round(len(crypto_idxs) / len(tickers) * M_size))
+        n_other  = M_size - n_bonds - n_crypto
+
+        rng   = np.random.default_rng(42)
+        idx_b = rng.choice(bond_idxs,   min(n_bonds,  len(bond_idxs)),   replace=False)
+        idx_c = rng.choice(crypto_idxs, min(n_crypto, len(crypto_idxs)), replace=False)
+        idx_o = rng.choice(other_idxs,  min(n_other,  len(other_idxs)),  replace=False)
+        sel   = np.concatenate([idx_b, idx_c, idx_o]).astype(int)
+
+        sub_mu        = mu_arr[sel]
+        sub_scenarios = scenarios_arr[:, sel]
+        sub_tickers   = [tickers[i] for i in sel]
+        T, M_sub      = sub_scenarios.shape
+        cvar_denom    = T * (1.0 - alpha)
+
+        # ── adaptive epsilon range ─────────────────────────────────────
+        w_eq     = np.ones(M_sub) / M_sub
+        port_ret = sub_scenarios @ w_eq
+        cvar_min = float(-np.quantile(port_ret, 1 - alpha) * 0.5)
+        cvar_max = float(-np.quantile(port_ret, 1 - alpha) * 2.0)
+        eps_list = np.linspace(cvar_min, cvar_max, n_epsilons)
+
+        # ── precompute index maps for THIS subset ──────────────────────
+        sub_sector_map  = {}
+        for i, t in enumerate(sub_tickers):
+            sec = SECTOR_MAP.get(t, "Unknown")
+            sub_sector_map.setdefault(sec, []).append(i)
+        sub_bond_idxs   = [i for i, t in enumerate(sub_tickers) if t in BOND_ETFS]
+        sub_crypto_idxs = [i for i, t in enumerate(sub_tickers) if t in CRYPTOS]
+
+        t0     = time.time()
+        solved = 0
+
+        for eps in eps_list:
+            try:
+                model = gp.Model()
+                model.setParam("OutputFlag", 0)
+                model.setParam("TimeLimit", time_limit / n_epsilons)
+
+                # ── build model manually (not via _build_cvar_model) ───
+                # so we can control K_sub independently
+                K_sub    = min(K, M_sub)
+                ones_col = np.ones((T, 1))
+
+                w   = model.addMVar(M_sub, lb=0.0, ub=W_MAX, name="w")
+                z   = model.addMVar(M_sub, vtype=GRB.BINARY, name="z")
+                VaR = model.addMVar(1, lb=-GRB.INFINITY,      name="VaR")
+                U   = model.addMVar(T, lb=0.0,                name="U")
+
+                model.addConstr(w.sum() == 1.0,    "Budget")
+                model.addConstr(z.sum() <= K_sub,  "Cardinality")
+                model.addConstr(w >= W_MIN * z,    "Link_Lower")
+                model.addConstr(w <= W_MAX * z,    "Link_Upper")
+
+                for sec, idxs in sub_sector_map.items():
+                    if sec not in ["Bond", "ETF", "Crypto"]:
+                        model.addConstr(
+                            gp.quicksum(w[i] for i in idxs) <= SECTOR_CAP,
+                            f"SecCap_{sec}"
+                        )
+                if sub_crypto_idxs:
+                    model.addConstr(
+                        gp.quicksum(w[i] for i in sub_crypto_idxs) <= CRYPTO_CAP,
+                        "Crypto_Cap"
+                    )
+                if sub_bond_idxs:
+                    model.addConstr(
+                        gp.quicksum(w[i] for i in sub_bond_idxs) >= BOND_FLOOR,
+                        "Bond_Floor"
+                    )
+
+                # ── CVaR with correct MVar broadcasting ────────────────
+                model.addConstr(
+                    U >= -sub_scenarios @ w - ones_col @ VaR,
+                    "Shortfall"
+                )
+                model.addConstr(
+                    VaR.sum() + (1.0 / cvar_denom) * U.sum() <= eps,
+                    "Epsilon_CVaR"
+                )
+                model.setObjective(sub_mu @ w, GRB.MAXIMIZE)
+                model.optimize()
+
+                if model.Status in [GRB.OPTIMAL, GRB.TIME_LIMIT]:
+                    solved += 1
+
+            except Exception as e:
+                print(f"  Warning at eps={eps:.4f}: {e}")
+
+        elapsed         = time.time() - t0
+        results[M_size] = elapsed
+        print(f"  -> {elapsed:.2f}s  ({solved}/{n_epsilons} solved)")
+
     return results

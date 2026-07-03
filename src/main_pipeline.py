@@ -97,18 +97,31 @@ class HVCallback(Callback):
         self.timestamps.append(time.time() - self._t0)
 
 
-def run_nsga2(problem, sampling, crossover, mutation, n_gen, seed=SEED, callback=None):
-    """Single NSGA-II run, returns (F_corrected, elapsed_seconds)."""
-    t0 = time.time()
-    res = pymoo_minimize(
-        problem,
-        NSGA2(pop_size=POP_SIZE, sampling=sampling, crossover=crossover,
-              mutation=mutation, eliminate_duplicates=True),
-        ("n_gen", n_gen), seed=seed, verbose=False, callback=callback
+# in main_pipeline.py — find your run_nsga2 function and fix it
+
+def run_nsga2(problem, sampling, crossover, mutation, n_gen,
+              callback=None, seed=42):   # ← add seed parameter
+    algo = NSGA2(
+        pop_size=500,
+        sampling=sampling,
+        crossover=crossover,
+        mutation=mutation,
+        eliminate_duplicates=True
     )
+
+    kwargs = {
+        "seed":    seed,      # ← use the seed parameter
+        "verbose": False,
+    }
+    if callback is not None:
+        kwargs["callback"] = callback
+
+    t0  = time.time()
+    res = pymoo_minimize(problem, algo, ("n_gen", n_gen), **kwargs)
     elapsed = time.time() - t0
+
     F = res.F.copy()
-    F[:, 0] = -F[:, 0]  # un-negate return (pymoo minimises by default)
+    F[:, 0] = -F[:, 0]
     return F, elapsed
 
 

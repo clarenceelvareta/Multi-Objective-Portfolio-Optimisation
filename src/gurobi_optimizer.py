@@ -72,7 +72,9 @@ def optimize_gurobi(mu, scenarios, tickers, epsilon_values=None, verbose=False):
     scenarios_arr = np.asarray(scenarios, dtype=float)
 
     if epsilon_values is None:
-        epsilon_values = np.linspace(0.010, 0.045, 20)
+        w_eq = np.ones(M) / M
+        eq_cvar_val = cvar(w_eq, scenarios_arr)
+        epsilon_values = np.linspace(eq_cvar_val * 0.5, eq_cvar_val * 3.0, 20)
 
     # precompute index maps
     sector_map_inv = {}

@@ -479,9 +479,9 @@ def main():
 
     for run_idx in range(N_RUNS_STATS):
         seed = run_idx * 7
-
-        F, _ = run_nsga2(problem_final, FloatRandomSampling(), SBX(prob=0.9, eta=15),
-                          PM(eta=20), N_GEN_MAIN, seed=seed)
+        F, _ = run_nsga2(problem_final, IntegerRandomSampling(),
+                  SBX(prob=0.9, eta=15, vtype=int),
+                  PM(eta=20, vtype=int), 50, seed=seed)
         hv_runs["NSGA-II"].append(hv_ind.do(F))
 
         ref_dirs = get_reference_directions("das-dennis", 2, n_partitions=12)

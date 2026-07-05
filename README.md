@@ -122,22 +122,6 @@ Gurobi also requires a working local Gurobi installation and license.
 - `figures/`  
   PDF and PNG plots for the report.
 
-## Computational Hardness Claim
-
-Use careful wording in the report. The scaling experiment is empirical
-evidence, not a mathematical proof by itself.
-
-Suggested wording:
-
-> The cardinality-constrained CVaR portfolio model is a mixed-integer
-> optimisation problem with a combinatorial asset-selection space. The
-> scaling experiment shows that exact MIP solution effort grows with
-> universe size, motivating the use of metaheuristic algorithms for
-> larger or repeated portfolio searches.
-
-Avoid saying that the scaling plot alone "proves NP-hardness." A stronger
-claim should be supported by a formal reduction or by citing established
-results for cardinality-constrained portfolio optimisation.
 
 ## Notes
 

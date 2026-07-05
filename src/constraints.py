@@ -1,4 +1,17 @@
-# src/constraints.py
+"""
+Portfolio feasibility checks and repair projection.
+
+The metaheuristic encodings can generate portfolios that violate the
+project constraints. This module provides:
+
+* `is_feasible()` for diagnostics and sanity checks,
+* `repair()` for projecting candidate `(z, w)` solutions back toward a
+  feasible portfolio before objective evaluation.
+
+`z` is the binary selected-asset vector and `w` is the full weight
+vector aligned with the same ticker order.
+"""
+
 import numpy as np
 from config import (
     K, W_MIN, W_MAX,
@@ -6,19 +19,25 @@ from config import (
     SECTOR_MAP, BOND_ETFS, CRYPTOS
 )
 
+
 def get_sector_indices(tickers: list) -> dict:
-    """Returns {sector_name: [indices]} for the given ticker list."""
+    """Return a mapping `{sector_name: [asset_indices]}` for `tickers`."""
     idx_map = {}
     for i, t in enumerate(tickers):
         sector = SECTOR_MAP.get(t, "Unknown")
         idx_map.setdefault(sector, []).append(i)
     return idx_map
 
+
 def is_feasible(z: np.ndarray, w: np.ndarray,
                 tickers: list) -> tuple[bool, list]:
     """
-    Returns (True, []) if feasible, or (False, [reasons]) if not.
-    Useful for debugging.
+    Check whether a full portfolio satisfies the configured constraints.
+
+    Returns:
+        `(True, [])` when feasible. Otherwise returns `False` and a list
+        of human-readable violation messages, useful for debugging repair
+        operators and selected Gurobi portfolios.
     """
     reasons = []
 
@@ -54,58 +73,46 @@ def is_feasible(z: np.ndarray, w: np.ndarray,
 def repair(z: np.ndarray, w: np.ndarray,
            tickers: list) -> tuple[np.ndarray, np.ndarray]:
     """
-    Project a (z, w) pair into the feasible region.
-    Used by NSGA-II and MOEA/D after crossover/mutation.
+    Project a candidate `(z, w)` pair back toward feasibility.
 
-    Steps:
-    1. Enforce cardinality — keep top-K by weight if z.sum() > K
-    2. Zero out weights for non-selected assets
-    3. Normalise to sum = 1  <-- MOVED HERE
-    4. Clip weights to [W_MIN, W_MAX]
-    5. Enforce bond floor — if bond weight < BOND_FLOOR, top up
-    6. Enforce crypto cap — if crypto weight > CRYPTO_CAP, scale down
-    7. Final Normalise to sum = 1 <-- ADDED AT THE END
+    The projection enforces cardinality, zeros non-selected assets,
+    normalises weights, clips asset weights, forces at least one bond
+    when bond assets exist, applies bond and crypto limits, and then
+    normalises the selected weights again.
+
+    Returns:
+        Repaired `(z, w)` arrays. The function is deterministic for a
+        given input and does not mutate the caller's arrays.
     """
     z = z.copy().astype(int)
     w = w.copy()
 
-    # Step 1: cardinality
     if z.sum() > K:
         selected = np.where(z == 1)[0]
-        # drop lowest-weight assets first
         drop = selected[np.argsort(w[selected])][:int(z.sum()) - K]
         z[drop] = 0
 
-    # Step 2: zero out non-selected
     w[z == 0] = 0.0
 
-    # If nothing selected, pick the asset with the highest weight
     if z.sum() == 0:
         best = np.argmax(w)
         z[best] = 1
 
     selected = np.where(z == 1)[0]
 
-    # Step 3: Initial normalise (so floors/caps are calculated on a 100% portfolio)
     total = w[selected].sum()
     if total > 0:
         w[selected] /= total
 
-    # Step 4: clip to [W_MIN, W_MAX]
     w[selected] = np.clip(w[selected], W_MIN, W_MAX)
 
-    # Step 5: bond floor
     bond_idxs = [i for i, t in enumerate(tickers) if t in BOND_ETFS]
     bond_selected = [i for i in bond_idxs if z[i] == 1]
 
-    # If no bond is currently selected, force one in by swapping out the
-    # current lowest-weight holding.
     if not bond_selected and bond_idxs and len(selected) > 0:
         lowest = selected[np.argsort(w[selected])[0]]
-        
-        # FIX: Actually zero out the weight of the asset we are dropping!
-        w[lowest] = 0.0  
-        
+        w[lowest] = 0.0
+
         z[lowest] = 0
         chosen_bond = bond_idxs[0]
         z[chosen_bond] = 1
@@ -114,14 +121,13 @@ def repair(z: np.ndarray, w: np.ndarray,
         bond_selected = [chosen_bond]
 
     bond_weight = w[bond_selected].sum() if bond_selected else 0.0
-    
+
     if bond_weight < BOND_FLOOR and bond_selected:
         deficit = BOND_FLOOR - bond_weight
         per_bond = deficit / len(bond_selected)
         for i in bond_selected:
             w[i] = min(w[i] + per_bond, W_MAX)
 
-    # Step 6: crypto cap
     crypto_idxs = [i for i, t in enumerate(tickers) if t in CRYPTOS]
     crypto_selected = [i for i in crypto_idxs if z[i] == 1]
     crypto_weight = w[crypto_selected].sum() if crypto_selected else 0.0
@@ -129,7 +135,6 @@ def repair(z: np.ndarray, w: np.ndarray,
         scale = CRYPTO_CAP / crypto_weight
         w[crypto_selected] *= scale
 
-    # Step 7: Final normalise (because adding deficits or scaling crypto breaks the sum=1)
     selected = np.where(z == 1)[0]
     total = w[selected].sum()
     if total > 0:

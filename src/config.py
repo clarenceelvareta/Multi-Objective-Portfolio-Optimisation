@@ -1,4 +1,11 @@
-# config.py
+"""
+Central configuration for the HST Project 1 portfolio study.
+
+This file defines the asset universe, date windows, portfolio
+constraints, and sector mappings used across the pipeline. Keeping these
+values in one module makes the optimisation experiments reproducible and
+prevents different scripts from silently using different assumptions.
+"""
 
 # Universe
 M = 100
@@ -33,7 +40,6 @@ BROAD_ETFS = [
 CRYPTOS = ["BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD"]
 
 # You'll fill in the 80 equities after running the screening step
-# Placeholder — replace with your final screened 80 tickers
 SP500_EQUITIES = ['NVDA', 'AAPL', 'AMD', 'INTC', 'MSFT', 'AVGO', 'MU', 'CSCO', 'LRCX', 'SMCI', 'KLAC', 'HPE', 'PFE', 'BMY', 'MRK', 'GILD', 'BSX', 'JNJ', 'VTRS', 'CVS', 'ABBV', 'ABT', 'BAC', 'WFC', 'C', 'JPM', 'HBAN', 'RF', 'KEY', 'PYPL', 'XYZ', 'MS', 'TSLA', 'AMZN', 'F', 'CMG', 'CCL', 'GM', 'NCLH', 'BKNG', 'CSX', 'GE', 'DAL', 'UAL', 'FAST', 'BA', 'LUV', 'RTX', 'NFLX', 'T', 'GOOGL', 'GOOG', 'META', 'CMCSA', 'VZ', 'WMT', 'KO', 'MO', 'KR', 'PG', 'MDLZ', 'KHC', 'XOM', 'KMI', 'OXY', 'HAL', 'SLB', 'CVX', 'PCG', 'NEE', 'EXC', 'AES', 'PPL', 'HST', 'KIM', 'WY', 'DOC', 'FCX', 'NEM', 'MOS']  # from data.ipynb output
 
 ALL_TICKERS = SP500_EQUITIES + BOND_ETFS + BROAD_ETFS + CRYPTOS

@@ -1,4 +1,17 @@
-# rerun_stats.py
+"""
+Targeted rerun script for statistical and convergence experiments.
+
+This script reloads cached prices and an existing `pipeline_results.json`,
+then reruns the stochastic algorithms for additional hypervolume
+statistics and convergence curves. It is useful when the full
+`main_pipeline.py` has already produced the Gurobi front and baseline
+results, but the statistical section needs to be repeated or extended.
+
+Important:
+    This file performs long-running optimisation immediately when run as
+    a script. It should not be imported as a lightweight helper module.
+"""
+
 import numpy as np
 import time
 import json

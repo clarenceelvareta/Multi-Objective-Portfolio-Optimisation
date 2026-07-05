@@ -1,4 +1,21 @@
-# gurobi_optimizer.py
+"""
+Exact mixed-integer CVaR portfolio optimisation with Gurobi.
+
+This module formulates the portfolio problem as an epsilon-constrained
+mixed-integer program:
+
+* maximise annualised expected return,
+* constrain historical CVaR to be below an epsilon value,
+* enforce budget, cardinality, asset weight, sector, crypto, and bond
+  allocation constraints.
+
+`optimize_gurobi()` sweeps epsilon values to construct an exact Pareto
+front for comparison against the metaheuristic algorithms. The
+`scaling_experiment_proper()` helper is retained for standalone scaling
+experiments, although the main pipeline now has a richer scaling
+diagnostic in `main_pipeline.py`.
+"""
+
 import numpy as np
 import time
 import gurobipy as gp

@@ -1,4 +1,19 @@
-# nsga2_optimizer.py
+"""
+pymoo problem definitions for the portfolio metaheuristics.
+
+The pipeline uses pymoo algorithms (NSGA-II, MOEA/D, AGE-MOEA) over
+portfolio selection encodings. Each candidate first determines a selected
+asset set, then a local SLSQP solve assigns continuous weights for that
+selected set. The returned objective vector follows pymoo's minimisation
+convention:
+
+* objective 1 = negative annualised return, so minimising improves return,
+* objective 2 = positive CVaR loss, so minimising reduces tail risk.
+
+Three subclasses implement the constraint-handling comparison:
+Repair, Penalty, and Decoder.
+"""
+
 import numpy as np
 from pymoo.core.problem import ElementwiseProblem
 from scipy.optimize import minimize

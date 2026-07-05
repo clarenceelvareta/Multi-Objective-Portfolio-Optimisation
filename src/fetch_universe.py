@@ -1,10 +1,25 @@
+"""
+Price-data loading and caching.
+
+The main pipeline calls `fetch_prices()` to obtain adjusted close prices
+for the configured universe. The function first tries the local CSV cache
+under `src/raw/`; if the cache is missing or disabled, it downloads from
+yfinance and writes the cache for later runs.
+
+Running this file directly performs a small data-loading smoke check.
+That mode may download market data, so use it only when you intentionally
+want to refresh or inspect the price panel.
+"""
+
 import os
 import yfinance as yf
 import pandas as pd
 from config import ALL_TICKERS, START_DATE, END_DATE
 
+
 RAW_DIR = os.path.join(os.path.dirname(__file__), "raw")
 os.makedirs(RAW_DIR, exist_ok=True)
+
 
 def fetch_prices(tickers=ALL_TICKERS,
                  start=START_DATE,
@@ -12,13 +27,24 @@ def fetch_prices(tickers=ALL_TICKERS,
                  cache=True,
                  cache_name="prices.csv") -> pd.DataFrame:
     """
-    Returns a DataFrame of adjusted close prices.
-    Shape: (T, M) — T trading days, M assets.
-    Columns: ticker symbols.
+    Load adjusted close prices for a ticker universe.
 
-    cache_name lets callers use a separate cache file so the main
-    100-asset (crypto-included) universe and the crypto-free GFC-only
-    universe don't overwrite each other.
+    Args:
+        tickers: Sequence of ticker symbols accepted by yfinance.
+        start: Inclusive start date passed to yfinance.
+        end: Exclusive end date passed to yfinance.
+        cache: When true, load from and save to `src/raw/cache_name`.
+        cache_name: CSV filename for the cached price panel.
+
+    Returns:
+        DataFrame indexed by date with one adjusted-close column per
+        asset. Columns with no data are dropped; small gaps are
+        forward-filled and remaining missing rows are removed.
+
+    Notes:
+        The final date range can be shorter than `start` to `end` if a
+        late-starting asset is included, because the pipeline requires a
+        complete rectangular panel for scenario calculations.
     """
     cache_path = os.path.join(RAW_DIR, cache_name)
 
@@ -37,22 +63,16 @@ def fetch_prices(tickers=ALL_TICKERS,
         progress=True
     )
 
-    # fix MultiIndex columns — keep only Close prices
     if isinstance(raw.columns, pd.MultiIndex):
         raw = raw["Close"]
     else:
         raw = raw[["Close"]]
 
-    # drop tickers with no data at all
     missing = raw.columns[raw.isnull().all()].tolist()
     if missing:
         print(f"\nWARNING: these tickers had no data and were dropped: {missing}")
     prices = raw.dropna(axis=1, how="all")
 
-    # WARNING: dropna(how="any") below keeps only rows where EVERY
-    # remaining ticker has a price. If any ticker's first trade date is
-    # late (e.g. a crypto or recent IPO), it truncates ALL other assets'
-    # history down to that date too. Report the culprits before dropping.
     first_valid = prices.apply(lambda col: col.first_valid_index())
     latest_start = first_valid.max()
     if latest_start is not None and latest_start > pd.Timestamp(start):
@@ -61,18 +81,17 @@ def fetch_prices(tickers=ALL_TICKERS,
               f"because of late-starting tickers:")
         print(late_starters.sort_values().to_string())
 
-    # forward-fill small gaps then drop any remaining NaNs
     prices = prices.ffill().dropna()
 
-    # save to cache
     if cache:
         prices.to_csv(cache_path)
         print(f"Prices cached to {cache_path}")
 
-    print(f"\n✓ Final universe: {prices.shape[1]} assets, {prices.shape[0]} days")
-    print(f"✓ Date range: {prices.index[0].date()} to {prices.index[-1].date()}")
+    print(f"\nFinal universe: {prices.shape[1]} assets, {prices.shape[0]} days")
+    print(f"Date range: {prices.index[0].date()} to {prices.index[-1].date()}")
 
     return prices
+
 
 if __name__ == "__main__":
     prices = fetch_prices()
@@ -83,9 +102,8 @@ if __name__ == "__main__":
     print("\nAssets loaded:")
     print(prices.columns.tolist())
 
-    # check for any remaining NaNs
     nan_cols = prices.columns[prices.isnull().any()].tolist()
     if nan_cols:
         print(f"\nWARNING: NaNs still present in: {nan_cols}")
     else:
-        print("\n✓ No NaNs in price data")
+        print("\nNo NaNs in price data")

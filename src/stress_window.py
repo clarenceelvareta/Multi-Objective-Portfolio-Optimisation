@@ -1,31 +1,55 @@
-# src/stress_windows.py
+"""
+Stress-window extraction and realised portfolio stress metrics.
+
+The main study compares the equal-weight and optimised portfolios during
+two out-of-sample stress periods configured in `config.py`: COVID-19 and
+the April 2025 tariff shock window. This module isolates those date
+windows and computes realised CVaR, maximum drawdown, and Sharpe ratio
+from actual window returns.
+"""
+
 import pandas as pd
 from config import COVID_START, COVID_END, TARIFF_END, TARIFF_START
 
-def tariff_window(ret_full):
-    """Extract the 2025 Trump Tariff shock window returns."""
+
+def tariff_window(ret_full: pd.DataFrame) -> pd.DataFrame:
+    """
+    Extract the configured April 2025 tariff shock return window.
+
+    Returns an empty DataFrame with matching columns if the data panel
+    does not cover the configured dates.
+    """
     mask = (ret_full.index >= TARIFF_START) & (ret_full.index <= TARIFF_END)
     ret_tariff = ret_full.loc[mask]
-    
+
     if ret_tariff.empty:
-        return ret_full.iloc[0:0]  # Return empty if no data
-    
+        return ret_full.iloc[0:0]
+
     return ret_tariff
 
+
 def covid_window(ret: pd.DataFrame) -> pd.DataFrame:
-    """COVID Feb-Apr 2020 out-of-sample returns."""
+    """Extract the configured COVID-19 stress return window."""
     return ret.loc[COVID_START:COVID_END]
+
 
 def stress_metrics(weights, ret_window: pd.DataFrame,
                    mu: pd.Series) -> dict:
     """
-    Given a weight vector and a stress-period returns DataFrame,
-    compute realised CVaR, max drawdown, and Sharpe ratio.
-    Returns a None-filled dict with a note if the window has no data,
-    instead of crashing on an empty-array quantile.
+    Compute realised stress-period risk and performance metrics.
+
+    Args:
+        weights: Full portfolio weight vector aligned with `ret_window`.
+        ret_window: Daily returns in the stress period.
+        mu: Annualised expected returns. Present for API compatibility;
+            realised metrics are computed from `ret_window`.
+
+    Returns:
+        Dictionary with realised CVaR, max drawdown, and Sharpe ratio.
+        If the window is empty, metric values are `None` and a note is
+        included instead of raising on an empty quantile.
     """
-    import numpy as np
-    from compute_cvar import cvar, expected_return
+    from compute_cvar import cvar
 
     if ret_window.empty:
         return {
@@ -52,6 +76,6 @@ def stress_metrics(weights, ret_window: pd.DataFrame,
 
     return {
         "realised_cvar": realised_cvar,
-        "max_drawdown":  max_dd,
-        "sharpe_ratio":  sharpe,
+        "max_drawdown": max_dd,
+        "sharpe_ratio": sharpe,
     }

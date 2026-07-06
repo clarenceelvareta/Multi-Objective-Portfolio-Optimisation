@@ -62,7 +62,7 @@ scenarios      = ret.values
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2: Load Gurobi best portfolio from results_updated.json
 # ─────────────────────────────────────────────────────────────────────────────
-RESULTS_PATH = "results_updated.json"
+RESULTS_PATH = "pipeline_results.json"
 
 if not os.path.exists(RESULTS_PATH):
     raise FileNotFoundError(

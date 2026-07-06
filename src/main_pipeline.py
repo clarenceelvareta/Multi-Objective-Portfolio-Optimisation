@@ -136,8 +136,7 @@ class HVCallback(Callback):
         self.hv_ind = hv_indicator
         self.history = []      # HV per generation
         self.timestamps = []   # wall-clock seconds per generation, from
-                                # the first notify() call (i.e. roughly
-                                # generation 1), not from process start
+                                # the start of pymoo_minimize()
         self._t0 = None
 
     def notify(self, algorithm):
@@ -183,6 +182,8 @@ def run_nsga2(problem, sampling, crossover, mutation, n_gen,
         kwargs["callback"] = callback
 
     t0 = time.time()
+    if callback is not None and hasattr(callback, "_t0"):
+        callback._t0 = t0
     res = pymoo_minimize(problem, algo, ("n_gen", n_gen), **kwargs)
     elapsed = time.time() - t0
 
@@ -454,16 +455,6 @@ def main():
         "weights": weight_table,
     }
 
-    # =================================================================
-    section("5. GUROBI SCALING EXPERIMENT -- NP-HARDNESS PROOF")
-    # =================================================================
-    # Uses stratified_ticker_sample() / gurobi_scaling_experiment()
-    # (defined above) instead of taking the first M tickers in list
-    # order -- see their docstrings for the full rationale. In short:
-    # a representative sub-universe at every M means the scaling
-    # comparison reflects genuine problem-size difficulty, not an
-    # artefact of which constraints happen to be active at small M.
-    # =================================================================
     section("5. GUROBI SCALING EXPERIMENT -- NP-HARDNESS PROOF")
     # =================================================================
 
@@ -495,8 +486,8 @@ def main():
 
     print(f"\nTotal experiment time: {total_scaling_time:.2f} seconds")
 
-    results["scaling"] = {
-        "times": {str(m): float(t) for m, t in scaling_results.items()},
+    results["scaling"] = {str(m): float(t) for m, t in scaling_results.items()}
+    results["scaling_config"] = {
         "pareto_points": 20,
         "total_experiment_time": float(total_scaling_time)
     }

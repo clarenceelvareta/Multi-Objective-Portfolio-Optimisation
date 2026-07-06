@@ -54,7 +54,8 @@ gurobi_cvars    = R["gurobi_pareto_front"]["cvars"]
 gurobi_F        = np.array([[r, c] for r, c in zip(gurobi_returns, gurobi_cvars)])
 gurobi_hv       = R["algorithm_comparison"]["Gurobi"]["HV"]
 
-scaling         = {int(k): v for k, v in R["scaling"].items()}
+raw_scaling     = R["scaling"].get("times", R["scaling"])
+scaling         = {int(k): v for k, v in raw_scaling.items()}
 ch_data         = R["constraint_handling"]
 ch_names        = ["Repair", "Penalty", "Decoder"]
 ch_curves_gen   = R["constraint_handling_curves"]["generations"]

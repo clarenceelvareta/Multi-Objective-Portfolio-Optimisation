@@ -88,6 +88,7 @@ SECTOR_MAP = {
     "RF": "Financials",
     "KEY": "Financials",
     "PYPL": "Financials",
+    "XYZ": "Financials",
     "MS": "Financials",
     
     # --- Consumer Discretionary ---
@@ -146,8 +147,8 @@ SECTOR_MAP = {
     
     # --- Materials ---
     "FCX": "Materials",
-    "DD": "Materials",
     "NEM": "Materials",
+    "MOS": "Materials",
     
     # --- Asset Classes (Keep these at the bottom) ---
     **{t: "Bond" for t in BOND_ETFS},

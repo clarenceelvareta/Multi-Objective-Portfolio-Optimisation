@@ -41,8 +41,8 @@ def stress_metrics(weights, ret_window: pd.DataFrame,
     Args:
         weights: Full portfolio weight vector aligned with `ret_window`.
         ret_window: Daily returns in the stress period.
-        mu: Annualised expected returns. Present for API compatibility;
-            realised metrics are computed from `ret_window`.
+        mu: Annualised expected returns, accepted to keep the stress
+            metric interface aligned with the rest of the pipeline.
 
     Returns:
         Dictionary with realised CVaR, max drawdown, and Sharpe ratio.

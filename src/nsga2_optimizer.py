@@ -225,9 +225,8 @@ class PortfolioProblemDecoder(BasePortfolioProblem):
         # decode: top-K indices by priority score
         selected = np.argsort(x)[-K:]
 
-        # ── FIX: force at least one bond in selection ──────────────────
-        # Without this, bond floor can never be satisfied since the
-        # SLSQP only optimises the selected subset
+        # Include a bond in the selected subset when the bond floor is active,
+        # so the downstream SLSQP weight optimisation can satisfy the floor.
         has_bond = any(i in self.bond_idxs for i in selected)
         if not has_bond and self.bond_idxs:
             # replace the lowest-priority selected asset with the

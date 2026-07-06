@@ -1,7 +1,7 @@
 """
 Additional financial robustness and stress-test figure script.
 
-This standalone helper loads `results_updated.json`, reconstructs the
+This standalone helper loads `pipeline_results.json`, reconstructs the
 Gurobi portfolio, optionally reruns faster versions of the metaheuristics
 to obtain representative portfolio weights, and writes stress-test
 figures under `figures/`.

@@ -55,6 +55,8 @@ def is_feasible(z: np.ndarray, w: np.ndarray,
 
     sector_idx = get_sector_indices(tickers)
     for sector, idxs in sector_idx.items():
+        if sector in ["Bond", "ETF", "Crypto"]:
+            continue
         s_weight = w[idxs].sum()
         if s_weight > SECTOR_CAP + 1e-6:
             reasons.append(f"Sector cap violated: {sector} = {s_weight:.4f}")

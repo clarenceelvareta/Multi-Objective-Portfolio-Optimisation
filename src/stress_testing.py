@@ -1,7 +1,7 @@
 """
 Additional financial robustness and stress-test figure script.
 
-This standalone helper loads `results_updated.json`, reconstructs the
+This standalone helper loads `pipeline_results.json`, reconstructs the
 Gurobi portfolio, optionally reruns faster versions of the metaheuristics
 to obtain representative portfolio weights, and writes stress-test
 figures under `figures/`.
@@ -62,7 +62,7 @@ scenarios      = ret.values
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2: Load Gurobi best portfolio from results_updated.json
 # ─────────────────────────────────────────────────────────────────────────────
-RESULTS_PATH = "results_updated.json"
+RESULTS_PATH = "pipeline_results.json"
 
 if not os.path.exists(RESULTS_PATH):
     raise FileNotFoundError(

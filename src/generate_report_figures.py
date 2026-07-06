@@ -1,7 +1,7 @@
 """
 Generate report figures from saved pipeline results.
 
-This script reads `results_updated.json`, parses the stored metrics, and
+This script reads `pipeline_results.json`, parses the stored metrics, and
 writes all report-ready figures to the `figures/` directory. It does not
 run optimisation itself; it is intended to be run after `main_pipeline.py`
 or `rerun_test.py` has produced the required JSON keys.
@@ -10,7 +10,7 @@ Usage:
     python src/generate_report_figures.py
 
 Expected inputs:
-    results_updated.json
+    pipeline_results.json
 
 Outputs:
     PDF and PNG versions of scaling, Pareto-front, convergence,
@@ -28,8 +28,10 @@ import matplotlib.gridspec as gridspec
 os.makedirs("figures", exist_ok=True)
 
 # ── Load ───────────────────────────────────────────────────────────────────
-print("Loading results_updated.json...")
-with open("results_updated.json") as f:
+RESULTS_PATH = "pipeline_results.json"
+
+print(f"Loading {RESULTS_PATH}...")
+with open(RESULTS_PATH) as f:
     R = json.load(f)
 print("✓ Loaded\n")
 
@@ -52,7 +54,8 @@ gurobi_cvars    = R["gurobi_pareto_front"]["cvars"]
 gurobi_F        = np.array([[r, c] for r, c in zip(gurobi_returns, gurobi_cvars)])
 gurobi_hv       = R["algorithm_comparison"]["Gurobi"]["HV"]
 
-scaling         = {int(k): v for k, v in R["scaling"].items()}
+raw_scaling     = R["scaling"].get("times", R["scaling"])
+scaling         = {int(k): v for k, v in raw_scaling.items()}
 ch_data         = R["constraint_handling"]
 ch_names        = ["Repair", "Penalty", "Decoder"]
 ch_curves_gen   = R["constraint_handling_curves"]["generations"]
@@ -69,16 +72,21 @@ stress_eq       = R["stress_equal_weight"]
 stress_opt      = R["stress_optimised"]
 alloc           = R["portfolio_allocation"]
 portfolio       = R["best_portfolio"]
-time_runs       = R["time_runs"]
-n_runs          = R["n_runs_used"]
+time_runs       = R.get("time_runs")
+n_runs          = R.get("n_runs_used", R.get("n_runs_stats", len(hv_stats["NSGA-II"]["values"])))
 
-# Build algorithm convergence time axis from time_runs mean per run
+# Build algorithm convergence time axis. `pipeline_results.json` does not
+# store per-generation wall-clock time for Section 10, so when `time_runs`
+# is absent we interpolate using the total algorithm-comparison runtime.
 algo_conv_time = {}
 for algo in ["NSGA-II", "MOEA/D", "AGE-MOEA"]:
     hvs     = conv_data[algo]
     n       = len(hvs)
-    mean_t  = float(np.mean(time_runs[algo]))
-    algo_conv_time[algo] = [mean_t * (i + 1) / n for i in range(n)]
+    if time_runs and algo in time_runs:
+        total_t = float(np.mean(time_runs[algo]))
+    else:
+        total_t = float(algo_data[algo]["time"])
+    algo_conv_time[algo] = [total_t * (i + 1) / n for i in range(n)]
 
 # ── Helper: dual plot ──────────────────────────────────────────────────────
 def dual_plot(curves_time, curves_gen, gurobi_hv, title, filename,
@@ -196,7 +204,7 @@ def plot_operator_convergence():
         curves_gen  = op_curves_gen,
         gurobi_hv   = gurobi_hv,
         title       = "Search Operators: Solution Quality vs CPU Time & Iteration\n"
-                      f"(NSGA-II + Repair, pop=500, {n_gen} generations, seed=42)",
+                      f"(NSGA-II + Decoder, pop=500, {n_gen} generations, seed=42)",
         filename    = "search_operator_convergence"
     )
 
@@ -211,7 +219,7 @@ def plot_algorithm_convergence():
         gurobi_hv   = gurobi_hv,
         title       = "Algorithm Comparison: Solution Quality vs CPU Time & Iteration\n"
                       f"(pop=500, {n_gen} generations, seed=42)\n"
-                      "Note: time axis interpolated from mean of 10 independent runs",
+                      "Note: time axis is interpolated from available total runtime",
         filename    = "algorithm_convergence"
     )
 
@@ -395,8 +403,12 @@ def plot_stress_test():
     ]
 
     for ax, (label, key, higher_better) in zip(axes, metrics):
-        eq_vals  = [abs(covid_eq[key]),  abs(tariff_eq[key])]
-        opt_vals = [abs(covid_opt[key]), abs(tariff_opt[key])]
+        if higher_better:
+            eq_vals  = [covid_eq[key],  tariff_eq[key]]
+            opt_vals = [covid_opt[key], tariff_opt[key]]
+        else:
+            eq_vals  = [abs(covid_eq[key]),  abs(tariff_eq[key])]
+            opt_vals = [abs(covid_opt[key]), abs(tariff_opt[key])]
         x        = np.arange(len(windows))
         w        = 0.35
 

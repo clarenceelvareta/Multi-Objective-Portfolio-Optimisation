@@ -4,7 +4,7 @@ Generate report figures from saved pipeline results.
 This script reads `pipeline_results.json`, parses the stored metrics, and
 writes all report-ready figures to the `figures/` directory. It does not
 run optimisation itself; it is intended to be run after `main_pipeline.py`
-or `rerun_test.py` has produced the required JSON keys.
+has produced the required JSON keys.
 
 Usage:
     python src/generate_report_figures.py
@@ -27,13 +27,13 @@ import matplotlib.gridspec as gridspec
 
 os.makedirs("figures", exist_ok=True)
 
-# ── Load ───────────────────────────────────────────────────────────────────
+# Load results
 RESULTS_PATH = "pipeline_results.json"
 
 print(f"Loading {RESULTS_PATH}...")
 with open(RESULTS_PATH) as f:
     R = json.load(f)
-print("✓ Loaded\n")
+print("Loaded\n")
 
 COLORS = {
     "NSGA-II":           "steelblue",
@@ -48,7 +48,7 @@ COLORS = {
     "Single-Point":      "seagreen",
 }
 
-# ── Parse ──────────────────────────────────────────────────────────────────
+# Parse saved metrics
 gurobi_returns  = R["gurobi_pareto_front"]["returns"]
 gurobi_cvars    = R["gurobi_pareto_front"]["cvars"]
 gurobi_F        = np.array([[r, c] for r, c in zip(gurobi_returns, gurobi_cvars)])
@@ -65,9 +65,9 @@ op_names        = ["SBX + PM", "Uniform Crossover", "Single-Point"]
 op_curves_gen   = R["search_operator_curves"]["generations"]
 op_curves_time  = R["search_operator_curves"]["cpu_time"]
 algo_data       = R["algorithm_comparison"]
-conv_data       = R["convergence_100gen"]   # NSGA-II now has real values
-hv_stats        = R["hv_stats_30_runs"]
-wilcoxon        = R["wilcoxon"]
+conv_data       = R["convergence_100gen"]
+hv_stats        = R.get("hv_stats") or R["hv_stats_30_runs"]
+mann_whitney    = R.get("mann_whitney") or R["wilcoxon"]
 stress_eq       = R["stress_equal_weight"]
 stress_opt      = R["stress_optimised"]
 alloc           = R["portfolio_allocation"]
@@ -88,7 +88,23 @@ for algo in ["NSGA-II", "MOEA/D", "AGE-MOEA"]:
         total_t = float(algo_data[algo]["time"])
     algo_conv_time[algo] = [total_t * (i + 1) / n for i in range(n)]
 
-# ── Helper: dual plot ──────────────────────────────────────────────────────
+# Plot helpers
+def with_zero_baseline(times, hvs):
+    """
+    Ensure convergence curves visibly start from t=0 and generation 0.
+
+    The pymoo callback records its first point after the first population
+    evaluation, which can be very expensive. For readability in the
+    report plots, prepend an explicit baseline point at HV=0.
+    """
+    times = list(times)
+    hvs = list(hvs)
+    if not times or times[0] > 0:
+        times = [0.0] + times
+        hvs = [0.0] + hvs
+    return times, hvs
+
+
 def dual_plot(curves_time, curves_gen, gurobi_hv, title, filename,
               xlabel_time="Wall-clock time (s)",
               xlabel_iter="Iteration (generation)"):
@@ -97,8 +113,8 @@ def dual_plot(curves_time, curves_gen, gurobi_hv, title, filename,
 
     for label, hvs in curves_gen.items():
         color = COLORS.get(label, "gray")
-        times = curves_time[label]
-        iters = list(range(1, len(hvs) + 1))
+        times, hvs = with_zero_baseline(curves_time[label], hvs)
+        iters = list(range(len(hvs)))
         axes[0].plot(times, hvs, color=color, linewidth=2,
                      label=label, alpha=0.9)
         axes[1].plot(iters, hvs, color=color, linewidth=2,
@@ -354,9 +370,9 @@ def plot_statistical_boxplot():
     axes[0].grid(True, alpha=0.3, axis="y")
 
     # Right: Wilcoxon p-values
-    pairs      = list(wilcoxon.keys())
-    pvals      = [wilcoxon[p]["p"] for p in pairs]
-    sigs       = [wilcoxon[p]["significant"] for p in pairs]
+    pairs      = list(mann_whitney.keys())
+    pvals      = [mann_whitney[p]["p"] for p in pairs]
+    sigs       = [mann_whitney[p]["significant"] for p in pairs]
     colors_p   = ["seagreen" if s == "YES" else "salmon" for s in sigs]
     pair_short = ["NSGA-II\nvs MOEA/D",
                   "NSGA-II\nvs AGE-MOEA",

@@ -12,11 +12,10 @@ Runs the full study end to end, in order:
   2.  Equal-weight baseline (CVaR, expected return)
   3.  Stress testing the equal-weight baseline (COVID-19, 2025 tariff shock)
   4.  Gurobi exact optimisation -- full epsilon-constraint Pareto front,
-      plus "best portfolio" selection using REALISED Sharpe (not a
-      Gaussian CVaR/1.65 proxy -- see the comment in Section 4 for why)
-  5.  Gurobi scaling experiment (NP-hardness demonstration), using a
-      STRATIFIED ticker sample at every universe size M (see Section 5
-      comment for why this matters)
+      plus "best portfolio" selection using realised Sharpe
+  5.  Gurobi full-frontier scaling experiment -- a 20-point epsilon
+      sweep at each universe size, with runtime, feasibility, optimality,
+      node-count, and MIP-gap diagnostics saved separately.
   6.  Constraint-handling comparison: Repair vs Penalty vs Decoder
   6.6 Constraint-handling: HV vs generation / HV vs CPU-time curves
   7.  Search-operator comparison: SBX vs Uniform Crossover vs Single-Point
@@ -32,35 +31,24 @@ Run this once, then run generate_report_figures.py -- it reads
 pipeline_results.json and produces every chart from real numbers, with
 no manual copy-pasting of console output required.
 
-WHY "final_sampling / final_crossover / final_mutation" EXIST
-----------------------------------------------------------------
-Sections 6, 7, 8, 9, and 10 all eventually need to run NSGA-II, MOEA/D,
-or AGE-MOEA against `problem_final` -- whichever constraint-handling
-strategy won Section 6 (Repair, Penalty, or Decoder). These three
-strategies use DIFFERENT VARIABLE TYPES:
+WHY OPERATOR SETS ARE CHOSEN CAREFULLY
+--------------------------------------
+Sections 8, 9, and 10 run NSGA-II, MOEA/D, and AGE-MOEA on
+`problem_final`, which is whichever constraint-handling strategy won
+Section 6 (Repair, Penalty, or Decoder). These strategies use different
+variable types:
     - Repair / Penalty (PortfolioProblem / PortfolioProblemPenalty):
       an INTEGER genotype (a near-binary selection vector, vtype=int).
     - Decoder (PortfolioProblemDecoder): a CONTINUOUS genotype (a
       priority-score vector in [0,1], no vtype).
 
-An earlier version of this pipeline hardcoded FloatRandomSampling() +
-continuous SBX for "NSGA-II" in Section 10's convergence-curve
-experiment, regardless of which constraint-handling method had won.
-When Repair or Penalty won (integer problems), this silently fed
-continuous, unbounded genotypes into a problem whose _evaluate()
-calls z.astype(int) -- truncating every individual into a degenerate
-selection that fails the problem's own cardinality guard clause,
-producing a FIXED, single dominated point for the entire 100-generation
-run (observed as: convergence_100gen["NSGA-II"] == [0.0]*100 in a real
-run, while MOEA/D and AGE-MOEA in that same block showed real curves,
-because only NSGA-II's config had been left stale).
+`operator_set_for_problem()` maps the winning strategy to the matching
+sampling, crossover, and mutation operators. This prevents accidental
+mixing of continuous operators with integer portfolio encodings.
 
-THE FIX: `final_sampling`, `final_crossover`, and `final_mutation` are
-computed ONCE, immediately after `best_ch` is known (end of Section 6),
-based on best_ch's actual variable type, and reused for every algorithm
-in Sections 8, 9, and 10. This makes the pipeline robust to whichever
-constraint-handling method wins on a given run, rather than assuming
-Repair (or Decoder) will always win.
+Section 7 is intentionally separate: the search-operator comparison is
+always run under Decoder so that SBX, Uniform Crossover, and Single-Point
+Crossover are compared on the same continuous priority-vector encoding.
 """
 
 import json
@@ -73,11 +61,10 @@ from compute_return  import compute_all
 from compute_cvar    import cvar, expected_return
 from constraints     import is_feasible, repair
 from stress_window   import covid_window, tariff_window, stress_metrics
-from config import (ALL_TICKERS, K, SECTOR_MAP, BOND_ETFS, CRYPTOS,
-                     BROAD_ETFS, SP500_EQUITIES, SECTOR_CAP, CRYPTO_CAP,
-                     BOND_FLOOR)
+from config import K, SECTOR_MAP, BOND_ETFS, CRYPTOS, BROAD_ETFS
 
 from gurobi_optimizer import optimize_gurobi
+from run_gurobi_scaling_frontier import run_scaling_experiment
 from nsga2_optimizer   import (PortfolioProblem, PortfolioProblemPenalty,
                                 PortfolioProblemDecoder)
 
@@ -98,26 +85,14 @@ from pymoo.core.callback           import Callback
 
 
 # =====================================================================
-# CONFIG FOR THIS RUN -- tweak here, not scattered through the file
+# CONFIG FOR THIS RUN
 # =====================================================================
 N_GEN_MAIN     = 50    # generations for all head-to-head comparisons
 N_GEN_CONVERGE = 100   # generations for the dedicated convergence study
 N_RUNS_STATS   = 15    # independent runs for statistical significance
-                       # (reduced from 30 -> 15 for a faster targeted
-                       # rerun; still valid for Mann-Whitney U, which
-                       # only requires n >= ~8 for the normal
-                       # approximation to be reasonable, at some cost
-                       # to statistical power versus n=30)
 POP_SIZE       = 500
 SEED           = 42
 RESULTS_PATH   = "pipeline_results.json"
-
-# Scaling experiment universe sizes and Gurobi's per-run epsilon (single
-# feasible point, not a full 20-point sweep -- see Section 5 docstring
-# for why a full sweep would be a more rigorous NP-hardness demonstration)
-SCALING_M_VALUES  = [20, 40, 60, 80, 100]
-SCALING_EPSILON   = 0.05
-
 
 def section(title):
     print("\n" + "=" * 60)
@@ -157,12 +132,56 @@ class HVCallback(Callback):
         self.timestamps.append(time.time() - self._t0)
 
 
+def with_zero_baseline(values):
+    """Prepend a zero baseline so convergence plots start at generation 0."""
+    values = list(values)
+    return values if values and values[0] == 0.0 else [0.0] + values
+
+
+def format_optional_float(value, fmt=".6g"):
+    """Format optional numeric values from JSON summaries without crashing on null."""
+    if value is None:
+        return "n/a"
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if np.isnan(value):
+        return "n/a"
+    return format(value, fmt)
+
+
+def operator_set_for_problem(strategy_name):
+    """
+    Return pymoo sampling/crossover/mutation operators matching the
+    constraint-handling problem's genotype.
+
+    Repair and Penalty use integer selection vectors. Decoder uses a
+    continuous priority-vector representation.
+    """
+    if strategy_name in ("Repair", "Penalty"):
+        return (
+            IntegerRandomSampling(),
+            SBX(prob=0.9, eta=15, vtype=int),
+            PM(eta=20, vtype=int),
+        )
+
+    if strategy_name == "Decoder":
+        return (
+            FloatRandomSampling(),
+            SBX(prob=0.9, eta=15),
+            PM(eta=20),
+        )
+
+    raise ValueError(f"Unknown constraint-handling strategy: {strategy_name}")
+
+
 def run_nsga2(problem, sampling, crossover, mutation, n_gen,
               callback=None, seed=SEED):
     """
-    Single NSGA-II run. Returns (F_corrected, elapsed_seconds).
+    Single NSGA-II run. Returns (F_report, elapsed_seconds).
 
-    F_corrected: the final population's objective matrix, with column 0
+    F_report: the final population's objective matrix, with column 0
     (return) negated back to its true sign. pymoo's Problem classes in
     this study internally MINIMISE both objectives (so that everything
     is a standard multi-objective minimisation), meaning objective 1
@@ -190,106 +209,6 @@ def run_nsga2(problem, sampling, crossover, mutation, n_gen,
     F = res.F.copy()
     F[:, 0] = -F[:, 0]
     return F, elapsed
-
-
-def stratified_ticker_sample(m_target):
-    """
-    Build a representative sub-universe of size m_target, preserving
-    (as closely as integer rounding allows) the same asset-class mix
-    as the full M=100 universe: 80% equities, 6% bonds, 10% broad
-    ETFs, 4% crypto.
-
-    WHY THIS EXISTS: an earlier version of the Section 5 scaling
-    experiment took tickers_full[:m_target] -- the FIRST m_target
-    tickers in ALL_TICKERS's list order. Because config.py orders
-    ALL_TICKERS as [equities..., bonds..., broad ETFs..., crypto...],
-    every small-M scaling run (e.g. M=20) contained ONLY equities --
-    zero bonds, zero ETFs, zero crypto. This meant the bond-floor and
-    crypto-cap constraints were not exercised the same way at small M
-    as they are at M=100, so the scaling comparison was not testing a
-    like-for-like problem shape across M: solve-time differences could
-    partly reflect "this M has fewer active constraints" rather than
-    purely "this M has more binary variables."
-
-    THE FIX: sample proportionally from each asset class at every M,
-    so a shrunk M=20 universe still has (roughly) bonds, ETFs, and
-    crypto in the same ratio as the real M=100 universe. Sampling is
-    deterministic (first-N within each class, not random) so the
-    experiment is exactly reproducible run to run.
-
-    NOTE: this changes the scaling experiment's numbers relative to
-    earlier runs of this pipeline (see report Limitations) -- the
-    small-M problems are now genuinely harder (more constraint types
-    active) and more representative, which is the point, but means
-    solve times at M=20/40/60/80 should not be compared directly
-    against numbers from a pre-fix run.
-    """
-    total = len(SP500_EQUITIES) + len(BOND_ETFS) + len(BROAD_ETFS) + len(CRYPTOS)
-    frac_eq  = len(SP500_EQUITIES) / total
-    frac_bd  = len(BOND_ETFS)      / total
-    frac_etf = len(BROAD_ETFS)     / total
-    frac_cr  = len(CRYPTOS)        / total
-
-    n_eq  = max(1, round(m_target * frac_eq))
-    n_bd  = max(1, round(m_target * frac_bd))
-    n_etf = max(1, round(m_target * frac_etf))
-    n_cr  = max(1, round(m_target * frac_cr))
-
-    # Rounding can overshoot m_target by a couple of assets; trim from
-    # the largest class (equities) first since it has the most slack.
-    sampled = (SP500_EQUITIES[:n_eq] + BOND_ETFS[:n_bd]
-               + BROAD_ETFS[:n_etf] + CRYPTOS[:n_cr])
-    while len(sampled) > m_target:
-        # remove the last equity added (keeps at least 1 of each other
-        # class intact, since equities have the largest allocation)
-        for i in range(len(sampled) - 1, -1, -1):
-            if sampled[i] in SP500_EQUITIES:
-                sampled.pop(i)
-                break
-        else:
-            sampled.pop()  # fallback, shouldn't normally trigger
-    while len(sampled) < m_target:
-        # top up from equities (the largest pool) if rounding undershot
-        remaining_eq = [t for t in SP500_EQUITIES if t not in sampled]
-        if not remaining_eq:
-            break
-        sampled.append(remaining_eq[0])
-
-    return sampled
-
-
-def gurobi_scaling_experiment(mu_full, scenarios_full, tickers_full):
-    """
-    Runs Gurobi at a single epsilon point (SCALING_EPSILON) across
-    SCALING_M_VALUES universe sizes, using a STRATIFIED ticker sample
-    at each M (see stratified_ticker_sample docstring for why).
-
-    Returns: {M: solve_time_seconds, ...}
-    """
-    results = {}
-    for m_target in SCALING_M_VALUES:
-        sub_tickers = stratified_ticker_sample(m_target)
-        idx = [tickers_full.index(t) for t in sub_tickers]
-        mu_sub = mu_full.values[idx] if hasattr(mu_full, "values") else mu_full[idx]
-        scenarios_sub = scenarios_full[:, idx]
-
-        n_eq  = sum(1 for t in sub_tickers if t in SP500_EQUITIES)
-        n_bd  = sum(1 for t in sub_tickers if t in BOND_ETFS)
-        n_etf = sum(1 for t in sub_tickers if t in BROAD_ETFS)
-        n_cr  = sum(1 for t in sub_tickers if t in CRYPTOS)
-        print(f"  M={m_target}: stratified sample = {n_eq} equities, "
-              f"{n_bd} bonds, {n_etf} ETFs, {n_cr} crypto "
-              f"({len(sub_tickers)} total)")
-
-        t0 = time.time()
-        fronts, _ = optimize_gurobi(mu_sub, scenarios_sub, sub_tickers,
-                                     epsilon_values=[SCALING_EPSILON])
-        elapsed = time.time() - t0
-        results[m_target] = elapsed
-        print(f"    -> solved in {elapsed:.2f}s "
-              f"({len(fronts)} feasible point(s) found)")
-
-    return results
 
 
 def main():
@@ -371,6 +290,9 @@ def main():
     # =================================================================
     section("4. GUROBI EXACT OPTIMISATION -- PARETO FRONT")
     # =================================================================
+    # Main reference front: choose the epsilon range adaptively from the
+    # equal-weight portfolio's empirical CVaR. This is intentionally
+    # separate from the fixed scaling grid used in Section 5.
     eq_cvar = cvar(np.ones(M) / M, scenarios)
     epsilons = np.linspace(eq_cvar * 0.5, eq_cvar * 3.0, 20)
     print(f"Epsilon range: [{epsilons[0]:.4f}, {epsilons[-1]:.4f}]")
@@ -388,26 +310,8 @@ def main():
     for pt in fronts:
         print(f"{pt['ret']:<14.4f} {pt['cvar']:<12.4f} {int(sum(pt['z']))}")
 
-    # --- Portfolio selection: REALISED Sharpe, not a Gaussian proxy. ---
-    # An earlier version of this pipeline selected the "best" portfolio
-    # by maximising an approximate Sharpe ratio computed as
-    #     (ret - rf) / (cvar / 1.65)
-    # using the Gaussian identity CVaR_0.95 ~= 1.65*sigma to back-solve
-    # an implied standard deviation from CVaR alone. This produced an
-    # implausibly high Sharpe (~15) because the identity assumes
-    # normally distributed returns; the realised distribution --
-    # especially with cryptocurrency exposure -- has heavier tails than
-    # the Gaussian, so CVaR is elevated relative to what the identity
-    # predicts, and back-solving sigma from an elevated CVaR under a
-    # false normality assumption UNDERSTATES sigma, inflating the
-    # resulting Sharpe estimate. This is a modelling artefact of the
-    # selection step, not a real property of the portfolio.
-    #
-    # Fix: compute the REALISED Sharpe ratio directly from the
-    # historical scenario returns for each candidate weight vector,
-    # exactly as stress_metrics() already does elsewhere in this
-    # pipeline (annualised return / annualised volatility of the
-    # actual daily portfolio returns).
+    # Select one reported portfolio from the Pareto front using realised
+    # Sharpe, computed directly from the historical scenario returns.
     rf = 0.02
     best_sharpe = -np.inf
     best_portfolio = None
@@ -455,41 +359,54 @@ def main():
         "weights": weight_table,
     }
 
-    section("5. GUROBI SCALING EXPERIMENT -- NP-HARDNESS PROOF")
+    section("5. GUROBI FULL-FRONTIER SCALING EXPERIMENT")
     # =================================================================
 
-    from gurobi_optimizer import scaling_experiment_proper
-
     print("Running scaling experiment...")
-    print("Each problem size solves a complete 20-point Pareto front.")
-
+    # Scaling diagnostic: run_gurobi_scaling_frontier.py defines a fixed
+    # EPS_GRID so solve times are compared on the same CVaR thresholds
+    # across universe sizes.
     t0 = time.time()
-
-    scaling_results = scaling_experiment_proper(
-        mu,
-        scenarios,
-        tickers,
-        n_epsilons=20,
-        time_limit=300
-    )
-
+    scaling_payload = run_scaling_experiment()
     total_scaling_time = time.time() - t0
+    scaling_summary = scaling_payload["summary"]
+    scaling_results = {
+        int(row["M"]): float(row["total_runtime_sec"])
+        for row in scaling_summary
+    }
 
     print("\n--- SCALING RESULTS ---")
-    print(f"{'M':<8} {'Time(s)':<12} {'Relative'}")
-    print("-"*35)
-
-    base = scaling_results[20]
-
-    for m in sorted(scaling_results.keys()):
-        print(f"{m:<8} {scaling_results[m]:<12.2f} {scaling_results[m]/base:.2f}x")
+    print(f"{'M':<8} {'Total(s)':<12} {'Feasible':<10} {'Optimal':<10} {'Max Gap'}")
+    print("-" * 58)
+    for row in scaling_summary:
+        print(
+            f"{int(row['M']):<8} "
+            f"{float(row['total_runtime_sec']):<12.2f} "
+            f"{int(row['feasible_points']):<10} "
+            f"{int(row['optimal_points']):<10} "
+            f"{format_optional_float(row.get('max_mip_gap'))}"
+        )
 
     print(f"\nTotal experiment time: {total_scaling_time:.2f} seconds")
 
     results["scaling"] = {str(m): float(t) for m, t in scaling_results.items()}
+    results["scaling_details"] = {
+        str(int(row["M"])): {
+            k: (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else v)
+            for k, v in row.items()
+            if k != "M"
+        }
+        for row in scaling_summary
+    }
     results["scaling_config"] = {
-        "pareto_points": 20,
-        "total_experiment_time": float(total_scaling_time)
+        **scaling_payload["settings"],
+        "pareto_points": len(scaling_payload["settings"]["EPS_GRID"]),
+        "total_experiment_time": float(total_scaling_time),
+        "output_files": scaling_payload["output_files"],
+        "interpretation": (
+            "Full epsilon-frontier scaling diagnostic; runtime and MIP gaps "
+            "are empirical solver evidence, not a mathematical proof of NP-hardness."
+        ),
     }
     # =================================================================
     section("6. CONSTRAINT HANDLING: REPAIR vs PENALTY vs DECODER")
@@ -532,29 +449,9 @@ def main():
 
     problem_final = {"Repair": problem_repair, "Penalty": problem_penalty,
                       "Decoder": problem_decoder}[best_ch]
-    nsga_F = constraint_results[best_ch]["F"]
-
-    # --- THE KEY FIX (see module docstring for full explanation) -------
-    # Define the operator set ONCE here, based on best_ch's actual
-    # variable type, and reuse it for every algorithm in Sections 8, 9,
-    # and 10 below. Repair and Penalty use an integer genotype;
-    # Decoder uses a continuous genotype. Using the wrong sampling/
-    # crossover/mutation type for a given problem silently corrupts
-    # that algorithm's results (observed previously as NSGA-II's
-    # 100-generation convergence curve being exactly 0.0 throughout,
-    # when Repair had won but Section 10 still hardcoded continuous
-    # operators left over from an assumption that Decoder would win).
-    is_integer_problem = best_ch in ("Repair", "Penalty")
-    if is_integer_problem:
-        final_sampling  = IntegerRandomSampling()
-        final_crossover = SBX(prob=0.9, eta=15, vtype=int)
-        final_mutation  = PM(eta=20, vtype=int)
-    else:  # Decoder: continuous genotype
-        final_sampling  = FloatRandomSampling()
-        final_crossover = SBX(prob=0.9, eta=15)
-        final_mutation  = PM(eta=20)
+    final_sampling, final_crossover, final_mutation = operator_set_for_problem(best_ch)
     print(f"(Sections 8/9/10 will use "
-          f"{'integer' if is_integer_problem else 'continuous'} "
+          f"{'integer' if best_ch in ('Repair', 'Penalty') else 'continuous'} "
           f"operators to match {best_ch}'s genotype.)")
 
     results["constraint_handling"] = {
@@ -567,10 +464,8 @@ def main():
     # =================================================================
     section("6.6 CONSTRAINT HANDLING: HV vs GENERATION / HV vs CPU TIME")
     # =================================================================
-    # NOTE: Repair's per-generation repair() projection is genuinely
-    # expensive at population 500; this step can take significantly
-    # longer than Penalty or Decoder purely because of that cost, not
-    # because of any bug.
+    # Repair's per-generation projection can take longer than Penalty or
+    # Decoder because each generation applies an explicit feasibility repair.
     ch_convergence = {}
     ch_time_curve = {}
     for name, (problem, sampling, crossover, mutation) in ch_runs.items():
@@ -582,22 +477,18 @@ def main():
         print(f"  Done -- final HV={cb.history[-1]:.6f}, total time={cb.timestamps[-1]:.1f}s")
 
     results["constraint_handling_curves"] = {
-        "generations": {name: hv_list for name, hv_list in ch_convergence.items()},
-        "cpu_time": {name: t_list for name, t_list in ch_time_curve.items()},
+        "generations": {name: with_zero_baseline(hv_list)
+                        for name, hv_list in ch_convergence.items()},
+        "cpu_time": {name: with_zero_baseline(t_list)
+                     for name, t_list in ch_time_curve.items()},
     }
 
     # =================================================================
     section("7. SEARCH OPERATOR VARIATION: SBX vs UNIFORM vs SINGLE-POINT")
     # =================================================================
-    # This comparison is deliberately always run under Decoder
-    # (problem_decoder, FloatRandomSampling), independent of which
-    # constraint-handling method won Section 6 -- the operator
-    # comparison's purpose is to isolate crossover-operator effects on
-    # a fixed, continuous search space, not to be re-run under whatever
-    # won Section 6. If Section 6's winner is later used for Section
-    # 8/9/10 algorithm comparisons, that is a SEPARATE, deliberate
-    # choice (compare algorithms under the best-performing constraint
-    # handling), not an inconsistency with this section.
+    # This comparison is deliberately run under Decoder, independent of
+    # Section 6's winner. Decoder provides one fixed continuous genotype
+    # for comparing crossover behaviour; Sections 8/9/10 use best_ch.
     operator_results = {}
     op_runs = {
         "SBX + PM":          SBX(prob=0.9, eta=15),
@@ -646,8 +537,10 @@ def main():
         print(f"  Done -- final HV={cb.history[-1]:.6f}, total time={cb.timestamps[-1]:.1f}s")
 
     results["search_operator_curves"] = {
-        "generations": {name: hv_list for name, hv_list in op_convergence.items()},
-        "cpu_time": {name: t_list for name, t_list in op_time_curve.items()},
+        "generations": {name: with_zero_baseline(hv_list)
+                        for name, hv_list in op_convergence.items()},
+        "cpu_time": {name: with_zero_baseline(t_list)
+                     for name, t_list in op_time_curve.items()},
     }
 
     # =================================================================
@@ -655,9 +548,7 @@ def main():
     # =================================================================
     # All three algorithms below run on problem_final (Section 6's
     # winning constraint-handling strategy) using final_sampling /
-    # final_crossover / final_mutation, defined once in Section 6 to
-    # match problem_final's actual genotype -- see the "THE KEY FIX"
-    # comment there for why this matters.
+    # final_crossover / final_mutation, chosen to match its genotype.
 
     print(f"Running NSGA-II (fresh run on problem_final = {best_ch})...")
     nsga_F, nsga_time = run_nsga2(problem_final, final_sampling, final_crossover,
@@ -711,11 +602,10 @@ def main():
     }
 
     # =================================================================
-    section("9. STATISTICAL SIGNIFICANCE -- 15 RUNS + WILCOXON TEST")
+    section("9. STATISTICAL SIGNIFICANCE -- 15 RUNS + MANN-WHITNEY U TEST")
     # =================================================================
     # All three algorithms use final_sampling/final_crossover/
-    # final_mutation, consistent with Section 8 above (see Section 6's
-    # "THE KEY FIX" comment).
+    # final_mutation, consistent with Section 8 above.
     hv_runs = {"NSGA-II": [], "MOEA/D": [], "AGE-MOEA": []}
     print(f"Running {N_RUNS_STATS} independent runs per algorithm...")
 
@@ -766,29 +656,24 @@ def main():
         print(f"{algo:<12} {s['mean']:>10.6f} {s['std']:>10.6f} {s['min']:>10.6f} {s['max']:>10.6f} {s['median']:>10.6f}")
 
     pairs = [("NSGA-II", "MOEA/D"), ("NSGA-II", "AGE-MOEA"), ("MOEA/D", "AGE-MOEA")]
-    wilcoxon_results = {}
-    print(f"\n--- WILCOXON / MANN-WHITNEY U TESTS ---")
+    mann_whitney_results = {}
+    print(f"\n--- MANN-WHITNEY U TESTS ---")
     for a, b in pairs:
         stat, p = mannwhitneyu(hv_stats[a]["values"], hv_stats[b]["values"], alternative="two-sided")
         sig = "YES" if p < 0.05 else "NO"
         label = f"{a} vs {b}"
-        wilcoxon_results[label] = {"stat": float(stat), "p": float(p), "significant": sig}
+        mann_whitney_results[label] = {"stat": float(stat), "p": float(p), "significant": sig}
         print(f"{label:<30} p={p:.6f}  significant={sig}")
 
-    results["hv_stats_30_runs"] = hv_stats  # key name kept for backward
-                                             # compatibility with
-                                             # generate_report_figures.py,
-                                             # even though N_RUNS_STATS
-                                             # is now 15, not 30
-    results["wilcoxon"] = wilcoxon_results
+    results["hv_stats"] = hv_stats
+    results["mann_whitney"] = mann_whitney_results
     results["n_runs_stats"] = N_RUNS_STATS
 
     # =================================================================
     section("10. CONVERGENCE CURVES (100 generations)")
     # =================================================================
     # All three algorithms use final_sampling/final_crossover/
-    # final_mutation, consistent with Sections 8 and 9 above. This is
-    # the exact fix for the bug described in the module docstring.
+    # final_mutation, consistent with Sections 8 and 9 above.
     convergence = {}
     print(f"Running convergence experiment ({N_GEN_CONVERGE} generations)...")
 

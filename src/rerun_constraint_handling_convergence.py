@@ -10,12 +10,12 @@ What it does:
     1. Loads cached prices via `fetch_prices()`.
     2. Rebuilds Repair, Penalty, and Decoder pymoo problems.
     3. Runs NSGA-II for each constraint-handling method.
-    4. Records HV per generation and true wall-clock time from the start
-       of `pymoo_minimize()`, including initial population evaluation.
+    4. Records HV per generation and wall-clock time from the start of
+       `pymoo_minimize()`.
     5. Backs up `pipeline_results.json`.
     6. Writes updated `constraint_handling_curves` into
        `pipeline_results.json`, so `generate_report_figures.py` can use
-       the corrected curves immediately.
+       the updated curves immediately.
 
 This script still takes time because Repair is expensive, but it is much
 shorter than rerunning the full main pipeline.
@@ -58,8 +58,7 @@ class HVCallback(Callback):
     Record hypervolume and elapsed wall-clock time at each generation.
 
     The timer is set by `run_nsga2_with_curve()` before optimisation
-    starts, so timestamps include the expensive initial population
-    evaluation that was missing from earlier curves.
+    starts, so timestamps include initial population evaluation.
     """
     def __init__(self, hv_indicator):
         super().__init__()
@@ -113,8 +112,8 @@ def run_nsga2_with_curve(problem, sampling, crossover, mutation, hv_indicator,
     elapsed = time.time() - t0
 
     return {
-        "hv": callback.history,
-        "cpu_time": callback.timestamps,
+        "hv": [0.0] + callback.history,
+        "cpu_time": [0.0] + callback.timestamps,
         "elapsed": float(elapsed),
     }
 
@@ -193,7 +192,8 @@ def main():
         "elapsed_by_method": elapsed_by_method,
         "timer_note": (
             "Timestamps start before pymoo_minimize(), so they include "
-            "initial population evaluation."
+            "initial population evaluation. A zero-HV baseline point is "
+            "prepended so report plots start at t=0."
         ),
     }
 
@@ -205,7 +205,7 @@ def main():
         json.dump(results, f, indent=2)
 
     print(f"Updated {RESULTS_PATH}")
-    print("Run generate_report_figures.py to regenerate the corrected graph.")
+    print("Run generate_report_figures.py to regenerate the graph.")
 
 
 if __name__ == "__main__":

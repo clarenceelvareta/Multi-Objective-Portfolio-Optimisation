@@ -62,9 +62,9 @@ def _build_cvar_model(m, mu_arr, scenarios_arr, tickers,
             "Bond_Floor"
         )
 
-    # ── CVaR linearisation ─────────────────────────────────────────────
+    # CVaR linearisation
     # U_t >= -r_t^T w - VaR  for all t
-    # KEY FIX: use np.ones((T,1)) @ VaR to broadcast MVar(1) across T rows
+    # Broadcast the scalar VaR decision variable across all scenarios.
     ones_col = np.ones((T, 1))
     m.addConstr(
         U >= -scenarios_arr @ w - ones_col @ VaR,

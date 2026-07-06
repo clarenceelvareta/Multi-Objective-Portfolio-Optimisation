@@ -30,9 +30,10 @@ The usual flow is:
 3. `compute_return.py` converts prices into daily log returns, annualised mean returns, and covariance.
 4. `compute_cvar.py` evaluates portfolio return and CVaR.
 5. `gurobi_optimizer.py` and `nsga2_optimizer.py` optimise portfolios.
-6. `stress_window.py` evaluates stress windows.
-7. `main_pipeline.py` saves results to `pipeline_results.json`.
-8. `generate_report_figures.py` turns the JSON results into figures.
+6. `run_gurobi_scaling_frontier.py` runs the full-frontier Gurobi scaling experiment.
+7. `stress_window.py` evaluates stress windows.
+8. `main_pipeline.py` saves results to `pipeline_results.json`.
+9. `generate_report_figures.py` turns the JSON results into figures.
 
 ## File-by-File Explanation
 
@@ -172,7 +173,7 @@ Main functions:
 
 - `_build_cvar_model(...)`: builds one Gurobi optimisation model for a fixed CVaR limit.
 - `optimize_gurobi(mu, scenarios, tickers, epsilon_values=None, verbose=False)`: solves many Gurobi models across different CVaR limits to trace the Pareto frontier.
-- `scaling_experiment_proper(mu, scenarios, tickers, n_epsilons=20, time_limit=300)`: runs a scaling experiment for smaller universe sizes.
+- `scaling_experiment_proper(mu, scenarios, tickers, n_epsilons=20, time_limit=300)`: older standalone scaling helper retained for reference. The main pipeline now uses `run_gurobi_scaling_frontier.py` for the report-facing scaling experiment.
 
 Decision variables:
 
@@ -197,6 +198,34 @@ CVaR is represented using the Rockafellar-Uryasev linear formulation. This makes
 Important consistency note:
 
 The Gurobi model applies sector caps only to ordinary equity sectors and separately handles bond and crypto limits. The feasibility checker, penalty strategy, and decoder use the same interpretation. Broad ETFs are not given a separate group cap unless one is added explicitly.
+
+### `src/run_gurobi_scaling_frontier.py`
+
+This file runs the report-facing Gurobi scaling experiment.
+
+What it does:
+
+1. Loads `src/raw/prices.csv`.
+2. Builds sub-universes for `M = 20, 40, 60, 80, 100, 150, 200`, skipping sizes larger than the available price panel.
+3. Solves a full 20-point epsilon frontier for each available universe size using `EPS_GRID = np.linspace(0.010, 0.045, 20)`.
+4. Records runtime, feasibility, optimality, MIP gap, branch-and-bound nodes, best return, and lowest realised CVaR.
+5. Saves raw and summary scaling files under `scaling_results/`.
+
+Generated files:
+
+- `scaling_results/gurobi_scaling_full_frontier_raw.csv`
+- `scaling_results/gurobi_scaling_full_frontier_summary.csv`
+- `scaling_results/gurobi_scaling_full_frontier_summary.json`
+
+Important settings:
+
+- `TIME_LIMIT_PER_EPS = 300`: each epsilon solve may run for up to 300 seconds.
+- `MIP_GAP_TARGET = 1e-4`: Gurobi target optimality gap.
+- `EPS_GRID`: fixed 20-point CVaR grid from `0.010` to `0.045`.
+
+Important caveat:
+
+This experiment is empirical solver evidence, not a mathematical proof of NP-hardness. It is useful for showing how exact mixed-integer optimisation behaves as the universe grows, but runtime depends on the data, epsilon grid, Gurobi settings, and hardware.
 
 ### `src/nsga2_optimizer.py`
 
@@ -270,7 +299,7 @@ Main sections:
 2. Evaluate the equal-weight baseline.
 3. Stress-test the equal-weight baseline.
 4. Run Gurobi exact optimisation.
-5. Run Gurobi scaling experiments.
+5. Run the Gurobi full-frontier scaling experiment.
 6. Compare constraint-handling strategies.
 7. Compare search operators.
 8. Compare NSGA-II, MOEA/D, AGE-MOEA, and Gurobi.
@@ -297,13 +326,15 @@ Important output keys:
 - `gurobi_pareto_front`
 - `best_portfolio`
 - `scaling`
+- `scaling_details`
+- `scaling_config`
 - `constraint_handling`
 - `constraint_handling_curves`
 - `search_operators`
 - `search_operator_curves`
 - `algorithm_comparison`
-- `hv_stats_30_runs`
-- `wilcoxon`
+- `hv_stats`
+- `mann_whitney`
 - `convergence_100gen`
 - `portfolio_allocation`
 - `sector_breakdown`
@@ -312,7 +343,7 @@ Important output keys:
 
 Runtime warning:
 
-This script can take a long time because it runs Gurobi, many metaheuristic optimisations, repeated statistical runs, and convergence tracking. Do not run it casually right before submission unless you have enough time.
+This script can take a long time because it runs Gurobi, the full-frontier scaling experiment, many metaheuristic optimisations, repeated statistical runs, and convergence tracking. The scaling section alone may solve 20 Gurobi models per available universe size, with a 300-second time limit per epsilon point.
 
 ### `src/generate_report_figures.py`
 
@@ -326,7 +357,7 @@ What it does:
 
 Main plot functions:
 
-- `plot_scaling()`: Gurobi runtime as universe size increases.
+- `plot_scaling()`: Gurobi full-frontier total runtime as universe size increases.
 - `plot_pareto_front()`: exact Gurobi CVaR-return Pareto front.
 - `plot_constraint_handling_convergence()`: HV curves for Repair, Penalty, and Decoder.
 - `plot_operator_convergence()`: HV curves for crossover operators.
@@ -388,20 +419,20 @@ These appear to be exploratory notebooks used for data screening and sector/univ
 
 ## Consistency Notes From Code Review
 
-The current codebase is mostly consistent after the latest cleanup. The checks performed were:
+The current codebase checks include:
 
 - all Python files compile successfully,
 - `ALL_TICKERS` contains 100 unique tickers,
 - every ticker in `ALL_TICKERS` now has a sector mapping,
 - there are no extra sector mappings for tickers outside the universe,
-- `generate_report_figures.py` can parse both the current flat scaling JSON format and the briefly used nested `{"times": ...}` format.
+- `generate_report_figures.py` reads the saved `pipeline_results.json` and writes report figures to `figures/`.
 
-Remaining caveats to keep in mind:
+Modelling notes:
 
 - `repair()` is heuristic and can occasionally leave tiny feasibility issues, especially around the bond floor after renormalisation.
 - Broad ETFs are not group-capped by the current mathematical model. They are only limited by individual position bounds unless an explicit ETF cap is added.
 - The standalone `stress_testing.py` script approximates metaheuristic stress weights unless exact metaheuristic weights are saved.
-- `hv_stats_30_runs` is a legacy JSON key name. The current run count is stored as `n_runs_stats = 15`.
+- The full-frontier scaling experiment writes extra CSV/JSON files under `scaling_results/`; these are separate from `pipeline_results.json`.
 
 ## Recommended Run Order
 
@@ -412,7 +443,7 @@ python src/main_pipeline.py
 python src/generate_report_figures.py
 ```
 
-For only regenerating the corrected constraint-handling convergence curves:
+For only regenerating the constraint-handling convergence curves:
 
 ```bash
 python src/rerun_constraint_handling_convergence.py
@@ -423,5 +454,11 @@ For additional stress-test figures:
 
 ```bash
 python src/stress_testing.py
+```
+
+For only the Gurobi full-frontier scaling experiment:
+
+```bash
+python src/run_gurobi_scaling_frontier.py
 ```
 

@@ -370,7 +370,9 @@ def main():
     # =================================================================
     section("4. GUROBI EXACT OPTIMISATION -- PARETO FRONT")
     # =================================================================
-    epsilons = np.linspace(0.010, 0.045, 20)
+    eq_cvar = cvar(np.ones(M) / M, scenarios)
+    epsilons = np.linspace(eq_cvar * 0.5, eq_cvar * 3.0, 20)
+    print(f"Epsilon range: [{epsilons[0]:.4f}, {epsilons[-1]:.4f}]")
     print(f"Sweeping {len(epsilons)} epsilon points...")
 
     t0 = time.time()

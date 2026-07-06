@@ -417,23 +417,6 @@ The repository also includes notebooks:
 
 These appear to be exploratory notebooks used for data screening and sector/universe construction. They are not part of the automated pipeline, but they help explain where the selected equity universe came from.
 
-## Consistency Notes From Code Review
-
-The current codebase checks include:
-
-- all Python files compile successfully,
-- `ALL_TICKERS` contains 100 unique tickers,
-- every ticker in `ALL_TICKERS` now has a sector mapping,
-- there are no extra sector mappings for tickers outside the universe,
-- `generate_report_figures.py` reads the saved `pipeline_results.json` and writes report figures to `figures/`.
-
-Modelling notes:
-
-- `repair()` is heuristic and can occasionally leave tiny feasibility issues, especially around the bond floor after renormalisation.
-- Broad ETFs are not group-capped by the current mathematical model. They are only limited by individual position bounds unless an explicit ETF cap is added.
-- The standalone `stress_testing.py` script approximates metaheuristic stress weights unless exact metaheuristic weights are saved.
-- The full-frontier scaling experiment writes extra CSV/JSON files under `scaling_results/`; these are separate from `pipeline_results.json`.
-
 ## Recommended Run Order
 
 For a normal final report refresh:

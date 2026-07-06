@@ -53,15 +53,11 @@ or duplicate the experiment.
 - `src/main_pipeline.py`  
   Runs the full experiment end to end and writes `pipeline_results.json`.
 
-- `src/rerun_test.py`  
-  Targeted long-running rerun script for statistical and convergence
-  experiments after `pipeline_results.json` already exists.
-
 - `src/generate_report_figures.py`  
   Reads `results_updated.json` and writes report-ready figures to
   `figures/`.
 
-- `src/tets.py`  
+- `src/stress_testing.py`  
   Standalone stress-test figure helper for additional robustness plots.
 
 - `sector.ipynb` and `src/data.ipynb`  
@@ -92,14 +88,7 @@ Gurobi also requires a working local Gurobi installation and license.
    python src/main_pipeline.py
    ```
 
-4. If needed, run the targeted rerun script for additional statistical
-   or convergence results:
-
-   ```bash
-   python src/rerun_test.py
-   ```
-
-5. Generate report figures after the relevant JSON file exists:
+4. Generate report figures after the relevant JSON file exists:
 
    ```bash
    python src/generate_report_figures.py
@@ -110,17 +99,9 @@ Gurobi also requires a working local Gurobi installation and license.
 - `pipeline_results.json`  
   Full output from `main_pipeline.py`.
 
-- `results_checkpoint_after_7_5.json`  
-  Checkpoint after the statistical rerun section.
-
-- `results_checkpoint_convergence.json`  
-  Checkpoint during convergence reruns.
-
-- `results_updated.json`  
-  Updated results used by `generate_report_figures.py`.
-
 - `figures/`  
   PDF and PNG plots for the report.
+
 
 
 ## Notes
